@@ -1,0 +1,213 @@
+Below is a comprehensive roadmap to reproduce the experiments and methods described in “Attention Is All You Need.” This plan is broken into sections covering the overall methodology, model implementation, experimental setup (including datasets and hyperparameters), and evaluation. It also highlights a few points that may need further clarification during your implementation.
+
+──────────────────────────────
+1. OVERVIEW & OBJECTIVES
+
+• Aim to implement the Transformer architecture from scratch without relying on any official code.
+• Reproduce major experiments:
+  – Machine Translation on WMT 2014 English→German and English→French.
+  – English Constituency Parsing on the WSJ portion of the Penn Treebank.
+• Verify model quality using BLEU scores for translation and F1 for parsing.
+• Use the same architectural design, training schedule, learning rate scheduling, and regularization techniques as described in the paper.
+
+──────────────────────────────
+2. MODEL METHODOLOGY
+
+A. Architecture Components
+
+ 1. Encoder Stack:
+  – Consists of N = 6 identical layers (for the base model).
+  – Each layer contains:
+   • A multi-head self-attention sub-layer.
+   • A position-wise fully connected feed-forward network.
+  – Each sub-layer has a residual connection followed by layer normalization.
+  – All sub-layer outputs and embeddings have dimension d_model = 512 (for the base model).
+
+ 2. Decoder Stack:
+  – Also consists of N = 6 identical layers.
+  – Each layer contains three sub-layers:
+   a. Masked multi-head self-attention (to prevent positions from “cheating” by looking ahead).
+   b. Multi-head attention over the encoder’s output (encoder-decoder attention).
+   c. Position-wise feed-forward network.
+  – Residual connections and layer normalization are applied around each sub-layer.
+  – The input embeddings in the decoder are also offset by one.
+
+B. Attention Mechanism
+
+ 1. Scaled Dot-Product Attention:
+  – Compute dot products between queries and keys.
+  – Scale by dividing by √(d_k) where typically d_k = d_model/h (e.g., for h = 8, d_k = 64).
+  – Apply softmax to get weights and then use them to compute a weighted sum of values.
+
+ 2. Multi-Head Attention:
+  – Perform h = 8 parallel attention operations.
+  – For each head, apply learned linear projections for queries, keys, and values.
+  – Concatenate the outputs from each head and project with a final linear layer.
+
+C. Position-wise Feed-Forward Networks
+
+ – Consist of two linear transformations with a ReLU activation in between.
+ – Input/output dimension is d_model (512 for the base), and the inner-layer dimension is d_ff = 2048.
+ – These are applied identically and separately at each position.
+
+D. Embeddings, Positional Encoding, and Softmax
+
+ – Use learned embeddings to map input tokens; output tokens are also embedded.
+ – The same weight matrix is shared between the embedding layers and the pre-softmax linear transformation.
+ – Multiply embedding weights by √(d_model) before summing with positional encodings.
+ – Positional Encoding:
+  • Use fixed sinusoidal positional encodings defined as:
+   - PE(pos, 2i) = sin(pos / (10000^(2i/d_model)))
+   - PE(pos, 2i+1) = cos(pos / (10000^(2i/d_model)))
+  • These encodings supply order information without recurrence.
+ – Note: The authors also experimented with learned positional embeddings, which produced nearly identical results.
+
+──────────────────────────────
+3. EXPERIMENTAL SETUP
+
+A. Datasets & Tokenization
+
+ 1. Machine Translation:
+  – WMT 2014 English-to-German:
+   • Use approximately 4.5 million sentence pairs.
+   • Tokenize using byte-pair encoding (BPE) with a shared source-target vocabulary of ~37,000 tokens.
+  – WMT 2014 English-to-French:
+   • Use approximately 36 million sentence pairs.
+   • Tokenize sentences into a word-piece vocabulary of 32,000 tokens.
+  – Batching:
+   • Batch sentences by approximate sequence length.
+   • Ensure that each training batch contains roughly 25,000 tokens for the source and 25,000 tokens for the target.
+
+ 2. English Constituency Parsing:
+  – Use the Wall Street Journal (WSJ) subset of the Penn Treebank.
+   • “WSJ-only” setting: Approximately 40K training sentences with a vocabulary of 16K tokens.
+   • Semi-supervised setting: Use additional corpora (~17M sentences) and a vocabulary of 32K tokens.
+  – Modify beam search settings (see below) to accommodate long output sequences.
+
+B. Training Schedule & Hardware
+
+ 1. Hardware:
+  – Use a machine with 8 NVIDIA P100 GPUs.
+  – Base model training on the translation tasks: 100,000 steps (about 12 hours total).
+  – Big model training: 300,000 steps, which takes approximately 3.5 days on 8 GPUs.
+
+ 2. Optimizer & Learning Rate:
+
+  – Use the Adam optimizer with:
+   • β1 = 0.9,
+   • β2 = 0.98,
+   • ϵ = 10⁻⁹.
+  – Learning rate schedule:
+   • Increase the learning rate linearly for the first warmup_steps (= 4000 steps).
+   • After the warmup phase, decay the learning rate proportionally to the inverse square root of the step number.
+  – This dynamic schedule is crucial for stable and effective training across steps.
+
+ 3. Regularization:
+
+  – Apply dropout in several places:
+   • Residual dropout: Dropout is applied to the output of each sub-layer before adding the residual.
+   • Dropout is also applied to the sums of the token embeddings and positional encodings.
+  – For the base model, use a dropout rate P_drop = 0.1.
+  – Note: For the Transformer (big) model, particularly on the English-to-French task, a dropout rate of 0.1 is used even though some experiments tested other values (e.g., 0.3).
+
+ 4. Label Smoothing:
+
+  – Use label smoothing with a smoothing factor ϵ_ls = 0.1 during training.
+  – This regularizes the model predictions, trading off perplexity for improved BLEU scores.
+
+C. Checkpointing & Inference Details
+
+ 1. Checkpoint Averaging:
+  – For the base translation models, average the last 5 checkpoints (saved at 10-minute intervals).
+  – For the big models, average the last 20 checkpoints.
+  – This averaging step is important for reducing model variance at inference time.
+
+ 2. Inference (Beam Search):
+  – Use beam search with:
+   • Beam size = 4 for translation tasks.
+   • Length penalty α = 0.6 is applied.
+  – Set the maximum output length to “input length + 50” for translation.
+  – For constituency parsing, modify beam search:
+   • Use beam size = 21.
+   • Use length penalty α = 0.3.
+   • Increase maximum output length to “input length + 300” to accommodate longer sequences.
+
+──────────────────────────────
+4. EVALUATION METRICS
+
+• Translation Quality:
+ – Measure BLEU scores on the newstest2014 sets.
+ – Compare achieved scores (e.g., 28.4 for English-to-German on the big model, 41.8 for English-to-French) against those reported in the paper.
+
+• Constituency Parsing:
+ – Evaluate using F1 scores on the WSJ Section 23 test set.
+ – Compare against baselines (e.g., scores around 91.3 for WSJ only and up to 92.7 in semi-supervised settings).
+
+• Other Metrics:
+ – Monitor training perplexity (note: it will increase slightly with label smoothing).
+ – Track training time per step (around 0.4 sec for each base model step and 1.0 sec for the big model).
+
+──────────────────────────────
+5. IMPLEMENTATION ROADMAP
+
+A. Module Design & Core Functions
+
+ 1. Tokenization & Data Pipeline:
+  – Implement BPE tokenization for EN-DE and word-piece tokenization for EN-FR.
+  – Write routines for batching based on sequence lengths and token counts.
+  – Handle vocabulary construction (37K for EN-DE, 32K for EN-FR, 16K/32K for parsing).
+
+ 2. Model Modules:
+  a. Embedding Layer + Positional Encoding:
+   – Write embedding initializations.
+   – Implement the sinusoidal (and possibly the alternative learned) positional encoding.
+  b. Multi-Head Attention:
+   – Implement scaled dot-product attention.
+   – Create functions for splitting projections, computing attention weights (with proper masking in the decoder), concatenation, and the final projection.
+   – Carefully implement masking for decoder self-attention to enforce autoregressive behavior.
+  c. Position-wise Feed-Forward Network:
+   – Two-layer MLP with ReLU activation.
+  d. Encoder and Decoder Blocks:
+   – Assemble the above components within the residual + layer normalization framework.
+   – Ensure that each sub-layer’s input is added (residual) and layer normalized.
+  e. Output Projection:
+   – Use a shared weight matrix for input embeddings and output projection before softmax.
+
+ 3. Training Loop and Scheduler:
+  – Build a training loop that:
+   • Loads batches of tokenized data.
+   • Applies the forward pass through the encoder and decoder.
+   • Computes the loss (incorporating label smoothing).
+   • Updates model weights using the Adam optimizer.
+  – Implement the learning rate scheduler with linear warmup (first 4000 steps) and inverse square-root decay.
+
+ 4. Checkpointing & Logging:
+  – Save periodic checkpoints.
+  – Implement logic for checkpoint averaging post-training before inference.
+  – Log key metrics such as training loss, perplexity, and step times.
+
+B. Inference Module
+
+ 1. Implement beam search decoding:
+  – Support beam search parameters (beam size, length penalty, maximum output length).
+  – For translation tasks, enforce early termination when appropriate.
+  – For constituency parsing, adjust beam size and maximum length as noted.
+
+──────────────────────────────
+6. POINTS REQUIRING CLARIFICATION
+
+• Batching details: The paper mentions batches of approximately 25,000 source and 25,000 target tokens. The exact strategy (e.g., dynamic padding, bucketed batching) might need design decisions.
+• Checkpoint frequency: The paper states checkpoints are saved every 10 minutes. Choose a frequency that matches your hardware setup.
+• Minor hyperparameter tweaks: Although most hyperparameters are specified, some implementation-specific decisions (gradient clipping, weight initialization details for layer normalization) are not fully elaborated.
+• Inference early-stopping: While “terminate early when possible” is mentioned, you may need to decide on a practical strategy for beam search termination.
+
+──────────────────────────────
+7. SUMMARY & NEXT STEPS
+
+• Implement the data pipeline covering tokenization and dynamic batching.
+• Develop modular components for embeddings, multi-head attention, feed-forward networks, and stack them for encoder/decoder.
+• Integrate the training loop with the Adam optimizer and custom learning rate scheduler.
+• Set up checkpointing, averaging, and evaluation modules.
+• Validate the implementation by comparing preliminary BLEU and F1 scores with the paper’s reported numbers.
+
+Following this detailed plan will provide a strong framework to later write and debug the actual Python code. Each element of the Transformer and the experimental settings has been closely matched to the original paper, ensuring careful reproducibility.

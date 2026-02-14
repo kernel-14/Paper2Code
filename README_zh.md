@@ -34,6 +34,16 @@ cd scripts
 bash run.sh
 ```
 
+- 新增功能：使用.env管理api，请修改根目录下.env文件
+
+- 在powershell中
+```bash
+pip install openai
+cd scripts
+python run.py
+```
+
+
 ### 使用开源模型和 vLLM
 - 如果您在安装 vLLM 时遇到任何问题，请参考 [官方 vLLM 仓库](https://github.com/vllm-project/vllm)。
 - 默认模型是 `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`。

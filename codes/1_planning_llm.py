@@ -290,8 +290,8 @@ for idx, instruction_msg in enumerate([plan_msg, file_list_msg, task_list_msg, c
 # save
 os.makedirs(output_dir, exist_ok=True)
 
-with open(f'{output_dir}/planning_response.json', 'w') as f:
+with open(f'{output_dir}/planning_response.json', 'w', encoding='utf-8') as f:
     json.dump(responses, f)
 
-with open(f'{output_dir}/planning_trajectories.json', 'w') as f:
+with open(f'{output_dir}/planning_trajectories.json', 'w', encoding='utf-8') as f:
     json.dump(trajectories, f)

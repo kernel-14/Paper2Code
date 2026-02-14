@@ -1,0 +1,362 @@
+## dataset_loader.py
+import os
+import logging
+import random
+from typing import Any, Dict, List, Tuple, Callable
+
+import torch
+from torch.utils.data import Dataset, DataLoader, Sampler
+import sentencepiece as spm
+from tqdm import tqdm
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Collate function for translation data (source-target pairs)
+def collate_translation_fn(batch: List[Tuple[List[int], List[int]]], pad_id: int) -> Dict[str, torch.Tensor]:
+    # Separate source and target sequences
+    src_seqs = [item[0] for item in batch]
+    tgt_seqs = [item[1] for item in batch]
+    # Determine maximum lengths within the batch for padding
+    max_src_len = max(len(seq) for seq in src_seqs)
+    max_tgt_len = max(len(seq) for seq in tgt_seqs)
+    # Pad source sequences
+    padded_src = [seq + [pad_id] * (max_src_len - len(seq)) for seq in src_seqs]
+    # Pad target sequences
+    padded_tgt = [seq + [pad_id] * (max_tgt_len - len(seq)) for seq in tgt_seqs]
+    src_tensor = torch.tensor(padded_src, dtype=torch.long)
+    tgt_tensor = torch.tensor(padded_tgt, dtype=torch.long)
+    return {"src": src_tensor, "tgt": tgt_tensor}
+
+# Collate function for parsing data (single sequence per example)
+def collate_parsing_fn(batch: List[List[int]], pad_id: int) -> torch.Tensor:
+    max_len = max(len(seq) for seq in batch)
+    padded_seqs = [seq + [pad_id] * (max_len - len(seq)) for seq in batch]
+    return torch.tensor(padded_seqs, dtype=torch.long)
+
+# Dynamic batch sampler for grouping examples by similar lengths
+class DynamicBatchSampler(Sampler[List[int]]):
+    def __init__(self, dataset: Dataset, max_tokens: int, shuffle: bool = False) -> None:
+        """
+        Args:
+            dataset: A torch Dataset object which must have a 'lengths' attribute (a list of int).
+            max_tokens: Maximum number of tokens per batch.
+            shuffle: Whether to shuffle the data before batching.
+        """
+        self.dataset = dataset
+        self.max_tokens = max_tokens
+        self.shuffle = shuffle
+        # Expect dataset to have a 'lengths' attribute
+        if not hasattr(self.dataset, "lengths"):
+            raise ValueError("Dataset must have a 'lengths' attribute for dynamic batching.")
+        self.lengths: List[int] = self.dataset.lengths
+
+    def __iter__(self):
+        indices = list(range(len(self.dataset)))
+        if self.shuffle:
+            random.shuffle(indices)
+        # Sort indices by length to group similar-length samples
+        indices = sorted(indices, key=lambda i: self.lengths[i])
+        
+        batch: List[int] = []
+        batch_max_len = 0
+        for idx in indices:
+            curr_length = self.lengths[idx]
+            new_batch_max = max(batch_max_len, curr_length)
+            # Dynamic batch token count: (batch_size + 1) * new_max_length
+            if (len(batch) + 1) * new_batch_max > self.max_tokens:
+                if batch:
+                    yield batch
+                batch = [idx]
+                batch_max_len = curr_length
+            else:
+                batch.append(idx)
+                batch_max_len = new_batch_max
+        if batch:
+            yield batch
+
+    def __len__(self) -> int:
+        count = 0
+        batch: List[int] = []
+        batch_max_len = 0
+        # Use sorted order for length estimation
+        indices = sorted(range(len(self.dataset)), key=lambda i: self.lengths[i])
+        for idx in indices:
+            curr_length = self.lengths[idx]
+            new_batch_max = max(batch_max_len, curr_length)
+            if (len(batch) + 1) * new_batch_max > self.max_tokens:
+                count += 1
+                batch = [idx]
+                batch_max_len = curr_length
+            else:
+                batch.append(idx)
+                batch_max_len = new_batch_max
+        if batch:
+            count += 1
+        return count
+
+# Dataset for translation tasks (source-target pairs)
+class TranslationDataset(Dataset):
+    def __init__(self, examples: List[Tuple[List[int], List[int]]]) -> None:
+        """
+        Args:
+            examples: List of tuples (source_tokens, target_tokens)
+        """
+        self.examples = examples
+        # Compute lengths as the maximum length between source and target for each example.
+        self.lengths: List[int] = [max(len(src), len(tgt)) for src, tgt in self.examples]
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> Tuple[List[int], List[int]]:
+        return self.examples[idx]
+
+# Dataset for parsing tasks (single sequence per example)
+class ParsingDataset(Dataset):
+    def __init__(self, examples: List[List[int]]) -> None:
+        """
+        Args:
+            examples: List of tokenized sentences.
+        """
+        self.examples = examples
+        self.lengths: List[int] = [len(tokens) for tokens in self.examples]
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> List[int]:
+        return self.examples[idx]
+
+# The main DatasetLoader class
+class DatasetLoader:
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initializes the DatasetLoader with configuration settings.
+
+        Args:
+            config: A dictionary containing configuration parameters.
+        """
+        self.config = config
+        # Determine task type: default to 'wmt_en_de' if not specified.
+        self.task: str = config.get("task", "wmt_en_de")
+        # Tokens per batch from config, default is 25000
+        self.tokens_per_batch: int = config.get("data", {}).get("tokens_per_batch", 25000)
+        # Number of worker threads for DataLoader; default is 4.
+        self.num_workers: int = config.get("data", {}).get("num_workers", 4)
+        # Special token IDs with defaults: pad=0, bos=1, eos=2.
+        self.pad_id: int = config.get("special_tokens", {}).get("pad_id", 0)
+        self.bos_id: int = config.get("special_tokens", {}).get("bos_id", 1)
+        self.eos_id: int = config.get("special_tokens", {}).get("eos_id", 2)
+        # Initialize the tokenizer based on task and tokenization settings.
+        self.tokenizer: spm.SentencePieceProcessor = self._init_tokenizer(self.task)
+
+    def _init_tokenizer(self, task: str) -> spm.SentencePieceProcessor:
+        """
+        Initializes and loads a SentencePiece tokenizer for the given task.
+
+        Args:
+            task: The task type (e.g., 'wmt_en_de', 'wmt_en_fr', or 'wsj').
+
+        Returns:
+            A loaded SentencePieceProcessor.
+        """
+        tokenizer = spm.SentencePieceProcessor()
+        data_cfg: Dict[str, Any] = self.config.get("data", {})
+        if task == "wmt_en_de":
+            sp_model_path = data_cfg.get("en_de_sp_model", "spm_en_de.model")
+        elif task == "wmt_en_fr":
+            sp_model_path = data_cfg.get("en_fr_sp_model", "spm_en_fr.model")
+        elif task == "wsj":
+            sp_model_path = data_cfg.get("wsj_sp_model", "spm_wsj.model")
+        else:
+            logger.error(f"Unsupported task: {task}")
+            raise ValueError(f"Unsupported task: {task}")
+
+        if not os.path.exists(sp_model_path):
+            logger.error(f"Tokenizer model file '{sp_model_path}' not found.")
+            raise FileNotFoundError(f"Tokenizer model file '{sp_model_path}' not found.")
+        tokenizer.Load(sp_model_path)
+        logger.info(f"Loaded tokenizer model from '{sp_model_path}' for task '{task}'.")
+        return tokenizer
+
+    def _read_translation_file(self, file_path: str) -> List[Tuple[str, str]]:
+        """
+        Reads a translation dataset file where each line contains a source-target pair.
+
+        Args:
+            file_path: Path to the translation data file.
+
+        Returns:
+            A list of tuples (source_sentence, target_sentence).
+        """
+        examples: List[Tuple[str, str]] = []
+        if not os.path.exists(file_path):
+            logger.error(f"Translation file not found: {file_path}")
+            raise FileNotFoundError(f"Translation file not found: {file_path}")
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if "\t" in line:
+                    parts = line.split("\t")
+                elif "|||" in line:
+                    parts = line.split("|||")
+                else:
+                    logger.warning(f"Line format not recognized: {line}")
+                    continue
+                if len(parts) < 2:
+                    continue
+                src = parts[0].strip()
+                tgt = parts[1].strip()
+                examples.append((src, tgt))
+        return examples
+
+    def _read_parsing_file(self, file_path: str) -> List[str]:
+        """
+        Reads a parsing dataset file where each line is a sentence.
+
+        Args:
+            file_path: Path to the parsing data file.
+
+        Returns:
+            A list of sentences.
+        """
+        sentences: List[str] = []
+        if not os.path.exists(file_path):
+            logger.error(f"Parsing file not found: {file_path}")
+            raise FileNotFoundError(f"Parsing file not found: {file_path}")
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                sentence = line.strip()
+                if sentence:
+                    sentences.append(sentence)
+        return sentences
+
+    def _tokenize_sentence(self, sentence: str, add_bos_eos: bool = False) -> List[int]:
+        """
+        Tokenizes a single sentence using the SentencePiece model.
+
+        Args:
+            sentence: The input sentence string.
+            add_bos_eos: Whether to add beginning-of-sentence and end-of-sentence tokens.
+
+        Returns:
+            A list of token IDs.
+        """
+        token_ids: List[int] = self.tokenizer.encode_as_ids(sentence)
+        if add_bos_eos:
+            token_ids = [self.bos_id] + token_ids + [self.eos_id]
+        return token_ids
+
+    def load_data(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
+        """
+        Loads raw data files, applies tokenization, creates dynamic batching, and
+        returns DataLoader objects for training, validation, and testing.
+        
+        Returns:
+            A tuple (train_loader, val_loader, test_loader) of PyTorch DataLoader objects.
+        """
+        data_cfg: Dict[str, Any] = self.config.get("data", {})
+        # Determine file paths based on the task
+        if self.task in ["wmt_en_de", "wmt_en_fr"]:
+            if self.task == "wmt_en_de":
+                train_file = data_cfg.get("en_de_train_file", "data/wmt14_en_de/train.txt")
+                val_file = data_cfg.get("en_de_val_file", "data/wmt14_en_de/valid.txt")
+                test_file = data_cfg.get("en_de_test_file", "data/wmt14_en_de/test.txt")
+            else:  # wmt_en_fr
+                train_file = data_cfg.get("en_fr_train_file", "data/wmt14_en_fr/train.txt")
+                val_file = data_cfg.get("en_fr_val_file", "data/wmt14_en_fr/valid.txt")
+                test_file = data_cfg.get("en_fr_test_file", "data/wmt14_en_fr/test.txt")
+        elif self.task == "wsj":
+            train_file = data_cfg.get("wsj_train_file", "data/wsj/train.txt")
+            val_file = data_cfg.get("wsj_val_file", "data/wsj/valid.txt")
+            test_file = data_cfg.get("wsj_test_file", "data/wsj/test.txt")
+        else:
+            logger.error(f"Unsupported task: {self.task}")
+            raise ValueError(f"Unsupported task: {self.task}")
+
+        logger.info(f"Loading training data from '{train_file}'")
+        # Read raw data files
+        if self.task in ["wmt_en_de", "wmt_en_fr"]:
+            raw_train = self._read_translation_file(train_file)
+            raw_val = self._read_translation_file(val_file)
+            raw_test = self._read_translation_file(test_file)
+        elif self.task == "wsj":
+            raw_train = self._read_parsing_file(train_file)
+            raw_val = self._read_parsing_file(val_file)
+            raw_test = self._read_parsing_file(test_file)
+        else:
+            raise ValueError(f"Unsupported task: {self.task}")
+
+        # Tokenize the raw data
+        if self.task in ["wmt_en_de", "wmt_en_fr"]:
+            tokenized_train: List[Tuple[List[int], List[int]]] = []
+            for src, tgt in tqdm(raw_train, desc="Tokenizing training data", leave=False):
+                src_tokens = self._tokenize_sentence(src, add_bos_eos=False)
+                tgt_tokens = self._tokenize_sentence(tgt, add_bos_eos=True)
+                tokenized_train.append((src_tokens, tgt_tokens))
+            tokenized_val: List[Tuple[List[int], List[int]]] = []
+            for src, tgt in tqdm(raw_val, desc="Tokenizing validation data", leave=False):
+                src_tokens = self._tokenize_sentence(src, add_bos_eos=False)
+                tgt_tokens = self._tokenize_sentence(tgt, add_bos_eos=True)
+                tokenized_val.append((src_tokens, tgt_tokens))
+            tokenized_test: List[Tuple[List[int], List[int]]] = []
+            for src, tgt in tqdm(raw_test, desc="Tokenizing test data", leave=False):
+                src_tokens = self._tokenize_sentence(src, add_bos_eos=False)
+                tgt_tokens = self._tokenize_sentence(tgt, add_bos_eos=True)
+                tokenized_test.append((src_tokens, tgt_tokens))
+            # Create dataset objects for translation tasks
+            train_dataset = TranslationDataset(tokenized_train)
+            val_dataset = TranslationDataset(tokenized_val)
+            test_dataset = TranslationDataset(tokenized_test)
+            # Use the translation collate function with provided pad token
+            collate_fn = lambda batch: collate_translation_fn(batch, self.pad_id)
+        elif self.task == "wsj":
+            tokenized_train = [self._tokenize_sentence(sentence, add_bos_eos=True) for sentence in tqdm(raw_train, desc="Tokenizing training data", leave=False)]
+            tokenized_val = [self._tokenize_sentence(sentence, add_bos_eos=True) for sentence in tqdm(raw_val, desc="Tokenizing validation data", leave=False)]
+            tokenized_test = [self._tokenize_sentence(sentence, add_bos_eos=True) for sentence in tqdm(raw_test, desc="Tokenizing test data", leave=False)]
+            # Create dataset objects for parsing tasks
+            train_dataset = ParsingDataset(tokenized_train)
+            val_dataset = ParsingDataset(tokenized_val)
+            test_dataset = ParsingDataset(tokenized_test)
+            collate_fn = lambda batch: collate_parsing_fn(batch, self.pad_id)
+        else:
+            raise ValueError(f"Unsupported task: {self.task}")
+
+        logger.info(f"Number of training examples: {len(train_dataset)}")
+        logger.info(f"Number of validation examples: {len(val_dataset)}")
+        logger.info(f"Number of test examples: {len(test_dataset)}")
+
+        # Create dynamic batch samplers for each split
+        train_sampler = DynamicBatchSampler(train_dataset, self.tokens_per_batch, shuffle=True)
+        val_sampler = DynamicBatchSampler(val_dataset, self.tokens_per_batch, shuffle=False)
+        test_sampler = DynamicBatchSampler(test_dataset, self.tokens_per_batch, shuffle=False)
+
+        # Create DataLoader objects with the appropriate collate function and sampler.
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
+            collate_fn=collate_fn,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=val_sampler,
+            collate_fn=collate_fn,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+        test_loader = DataLoader(
+            test_dataset,
+            batch_sampler=test_sampler,
+            collate_fn=collate_fn,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+        logger.info("DataLoaders created successfully.")
+        return train_loader, val_loader, test_loader

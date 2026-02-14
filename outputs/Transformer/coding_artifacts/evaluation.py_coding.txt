@@ -1,0 +1,351 @@
+```python
+"""evaluation.py
+
+This module implements the Evaluation class for running inference using beam search
+and computing evaluation metrics (BLEU for machine translation and F1 for constituency parsing)
+based on the Transformer model described in "Attention Is All You Need." The class uses a 
+SentencePiece model for decoding token ids back into text.
+"""
+
+import math
+import time
+import logging
+from typing import Any, Dict, List, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import sentencepiece as spm
+
+# Set up logging configuration.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class Evaluation:
+    """
+    Evaluation class that performs inference on test data using beam search decoding 
+    and computes evaluation metrics.
+    
+    Attributes:
+        model (nn.Module): The Transformer model.
+        test_data (Any): Test data loader.
+        config (dict): Configuration dictionary loaded from config.yaml.
+        task (str): Task type, e.g. 'wmt_en_de', 'wmt_en_fr' for translation or 'wsj' for parsing.
+        beam_size (int): Beam search beam size.
+        length_penalty (float): Length penalty for beam search scoring.
+        max_length_offset (int): Maximum additional output tokens allowed compared to input length.
+        bos_id (int): Beginning-of-sequence token id.
+        eos_id (int): End-of-sequence token id.
+        pad_id (int): Padding token id.
+        tokenizer (spm.SentencePieceProcessor): SentencePiece model used for decoding token ids.
+        device (torch.device): Device used for computation.
+    """
+
+    def __init__(self, model: nn.Module, test_data: Any, config: Dict[str, Any]) -> None:
+        """
+        Initializes the evaluation with the model, test data loader, and configuration.
+
+        Args:
+            model (nn.Module): The trained Transformer model.
+            test_data (Any): DataLoader containing test examples.
+            config (dict): Configuration dictionary with settings from config.yaml.
+        """
+        self.model: nn.Module = model
+        self.test_data: Any = test_data
+        self.config: Dict[str, Any] = config
+
+        self.model.eval()  # Set model to evaluation mode.
+        # Determine task type from config (default to translation 'wmt_en_de')
+        self.task: str = self.config.get("task", "wmt_en_de")
+
+        # Extract inference configuration based on task.
+        inference_cfg: Dict[str, Any] = {}
+        if self.task in ["wmt_en_de", "wmt_en_fr"]:
+            inference_cfg = self.config.get("inference", {}).get("translation", {})
+            self.beam_size: int = inference_cfg.get("beam_size", 4)
+            self.length_penalty: float = inference_cfg.get("length_penalty", 0.6)
+            self.max_length_offset: int = inference_cfg.get("max_length_offset", 50)
+        elif self.task == "wsj":
+            inference_cfg = self.config.get("inference", {}).get("parsing", {})
+            self.beam_size = inference_cfg.get("beam_size", 21)
+            self.length_penalty = inference_cfg.get("length_penalty", 0.3)
+            self.max_length_offset = inference_cfg.get("max_length_offset", 300)
+        else:
+            # Default to translation settings if task is not explicitly recognized.
+            self.beam_size = 4
+            self.length_penalty = 0.6
+            self.max_length_offset = 50
+
+        # Retrieve special token IDs from configuration or use defaults.
+        special_tokens: Dict[str, Any] = self.config.get("special_tokens", {})
+        self.pad_id: int = special_tokens.get("pad_id", 0)
+        self.bos_id: int = special_tokens.get("bos_id", 1)
+        self.eos_id: int = special_tokens.get("eos_id", 2)
+
+        # Load the SentencePiece tokenizer based on task.
+        data_cfg: Dict[str, Any] = self.config.get("data", {})
+        sp_model_path: str = ""
+        if self.task == "wmt_en_de":
+            sp_model_path = data_cfg.get("en_de_sp_model", "spm_en_de.model")
+        elif self.task == "wmt_en_fr":
+            sp_model_path = data_cfg.get("en_fr_sp_model", "spm_en_fr.model")
+        elif self.task == "wsj":
+            sp_model_path = data_cfg.get("wsj_sp_model", "spm_wsj.model")
+        else:
+            logger.error(f"Unsupported task type '{self.task}' for evaluation.")
+            raise ValueError(f"Unsupported task type '{self.task}'.")
+
+        self.tokenizer: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
+        if not self.tokenizer.Load(sp_model_path):
+            logger.error(f"Failed to load SentencePiece model from '{sp_model_path}'.")
+            raise FileNotFoundError(f"SentencePiece model file '{sp_model_path}' not found or failed to load.")
+        else:
+            logger.info(f"Loaded SentencePiece model from '{sp_model_path}' for task '{self.task}'.")
+
+        # Determine device from model parameters.
+        self.device: torch.device = next(model.parameters()).device
+
+    def beam_search(self, src: torch.Tensor) -> List[int]:
+        """
+        Performs beam search decoding for a single source example.
+
+        Args:
+            src (torch.Tensor): Source tensor of shape (1, src_seq_len).
+
+        Returns:
+            List[int]: The best decoded token id sequence.
+        """
+        # Ensure src is on correct device.
+        src = src.to(self.device)
+        src_seq_len: int = src.size(1)
+        # Maximum decoding length: input length + offset from config.
+        max_length: int = src_seq_len + self.max_length_offset
+
+        # Initialize the beam with a single candidate starting with bos_id.
+        beam: List[Tuple[List[int], float, bool]] = [([self.bos_id], 0.0, False)]  # (sequence, cumulative log score, finished flag)
+
+        for step in range(max_length):
+            new_beam: List[Tuple[List[int], float, bool]] = []
+            # Flag to check if all candidates in beam are finished.
+            all_finished: bool = True
+
+            for seq, score, finished in beam:
+                if finished:
+                    new_beam.append((seq, score, True))
+                    continue
+
+                # Prepare the target input tensor of shape (1, current_seq_len).
+                tgt_input: torch.Tensor = torch.tensor([seq], dtype=torch.long, device=self.device)
+                # Run model forward to obtain logits.
+                with torch.no_grad():
+                    output_logits: torch.Tensor = self.model({"src": src, "tgt": tgt_input})
+                # Get logits for the last time step.
+                # output_logits shape: (1, tgt_seq_len, vocab_size)
+                last_logits: torch.Tensor = output_logits[0, -1, :]  # Shape: (vocab_size,)
+                # Compute log probabilities.
+                log_probs: torch.Tensor = torch.log_softmax(last_logits, dim=-1)
+                # Get top beam_size candidate next tokens.
+                topk_log_probs, topk_indices = torch.topk(log_probs, self.beam_size)
+
+                for log_prob, token_id in zip(topk_log_probs.tolist(), topk_indices.tolist()):
+                    new_seq: List[int] = seq + [token_id]
+                    new_score: float = score + log_prob
+                    finished_flag: bool = token_id == self.eos_id
+                    new_beam.append((new_seq, new_score, finished_flag))
+                all_finished = all_finished and finished
+
+            if not new_beam:
+                break
+
+            # Define the adjusted score function using length penalty.
+            def adjusted_score(candidate: Tuple[List[int], float, bool]) -> float:
+                candidate_seq, candidate_score, _ = candidate
+                length: int = len(candidate_seq)
+                penalty: float = ((5 + length) / 6) ** self.length_penalty
+                return candidate_score / penalty
+
+            # Retain top beam_size candidates.
+            new_beam = sorted(new_beam, key=adjusted_score, reverse=True)[: self.beam_size]
+            beam = new_beam
+
+            # If all beam candidates have finished, terminate early.
+            if all(finished for _, _, finished in beam):
+                break
+
+        # Select the best candidate from the beam based on adjusted score.
+        best_candidate: Tuple[List[int], float, bool] = max(beam, key=adjusted_score)
+        return best_candidate[0]
+
+    def decode_sequence(self, tokens: List[int]) -> str:
+        """
+        Decodes a list of token ids into a string, removing special tokens.
+
+        Args:
+            tokens (List[int]): List of token ids.
+
+        Returns:
+            str: Decoded string.
+        """
+        # Filter out special tokens: bos, eos and pad.
+        filtered_tokens: List[int] = [token for token in tokens if token not in [self.bos_id, self.eos_id, self.pad_id]]
+        # Decode the token ids into a string using SentencePiece.
+        decoded_text: str = self.tokenizer.DecodeIds(filtered_tokens)
+        return decoded_text
+
+    def _compute_bleu(self, candidates: List[str], references: List[str]) -> float:
+        """
+        Computes a corpus-level BLEU score for candidate and reference sentences.
+
+        This implementation computes n-gram precisions for n=1 to 4 with uniform weights
+        and applies a brevity penalty.
+
+        Args:
+            candidates (List[str]): List of candidate sentences.
+            references (List[str]): List of reference sentences.
+
+        Returns:
+            float: The BLEU score.
+        """
+        def ngrams(sentence: List[str], n: int) -> Dict[Tuple[str, ...], int]:
+            counts = {}
+            for i in range(len(sentence) - n + 1):
+                gram = tuple(sentence[i:i+n])
+                counts[gram] = counts.get(gram, 0) + 1
+            return counts
+
+        weights: List[float] = [0.25, 0.25, 0.25, 0.25]
+        precision_scores: List[float] = []
+        total_candidate_length: int = 0
+        total_reference_length: int = 0
+
+        for n in range(1, 5):
+            total_clip: int = 0
+            total_count: int = 0
+            for cand, ref in zip(candidates, references):
+                cand_tokens: List[str] = cand.split()
+                ref_tokens: List[str] = ref.split()
+                total_candidate_length += len(cand_tokens)
+                total_reference_length += len(ref_tokens)
+                cand_ngrams = ngrams(cand_tokens, n)
+                ref_ngrams = ngrams(ref_tokens, n)
+                for gram, count in cand_ngrams.items():
+                    clip_count = min(count, ref_ngrams.get(gram, 0))
+                    total_clip += clip_count
+                    total_count += count
+            # Avoid division by zero.
+            p_n = (total_clip / total_count) if total_count != 0 else 0.0
+            precision_scores.append(p_n)
+
+        # Compute geometric mean of precision scores.
+        if min(precision_scores) > 0:
+            geo_mean = math.exp(sum(w * math.log(p) for w, p in zip(weights, precision_scores)))
+        else:
+            geo_mean = 0.0
+
+        # Compute brevity penalty.
+        ref_length = total_reference_length
+        cand_length = total_candidate_length
+        bp = 1.0 if cand_length > ref_length else math.exp(1 - ref_length / cand_length)
+        bleu = bp * geo_mean
+        return bleu
+
+    def _compute_f1(self, candidates: List[str], references: List[str]) -> float:
+        """
+        Computes an F1 score based on token-level overlap between candidate and reference 
+        sentences. This is a simplified approximation for constituency parsing evaluation.
+        
+        Args:
+            candidates (List[str]): List of predicted parse strings.
+            references (List[str]): List of gold-standard parse strings.
+        
+        Returns:
+            float: The F1 score (in percentage).
+        """
+        total_precision: float = 0.0
+        total_recall: float = 0.0
+        n_samples: int = len(candidates)
+        
+        for cand, ref in zip(candidates, references):
+            cand_tokens = set(cand.split())
+            ref_tokens = set(ref.split())
+            if len(cand_tokens) == 0 or len(ref_tokens) == 0:
+                continue
+            overlap = cand_tokens.intersection(ref_tokens)
+            precision = len(overlap) / len(cand_tokens)
+            recall = len(overlap) / len(ref_tokens)
+            total_precision += precision
+            total_recall += recall
+        
+        avg_precision = total_precision / n_samples if n_samples > 0 else 0.0
+        avg_recall = total_recall / n_samples if n_samples > 0 else 0.0
+        if avg_precision + avg_recall == 0:
+            f1 = 0.0
+        else:
+            f1 = 2 * avg_precision * avg_recall / (avg_precision + avg_recall)
+        return f1 * 100.0  # Return as percentage
+
+    def evaluate(self) -> Dict[str, float]:
+        """
+        Runs beam search decoding on the test data, decodes token ids to strings, 
+        and computes evaluation metrics (BLEU for translation or F1 for parsing).
+
+        Returns:
+            Dict[str, float]: A dictionary containing evaluation metrics.
+                For translation: {"BLEU": value, "avg_inference_time": value_in_seconds}
+                For parsing: {"F1": value, "avg_inference_time": value_in_seconds}
+        """
+        self.model.eval()
+        candidate_texts: List[str] = []
+        reference_texts: List[str] = []
+        inference_times: List[float] = []
+        
+        # Iterate over test data (assumed to be in batches).
+        for batch in self.test_data:
+            # Assume batch is a dict with keys "src" and "tgt"
+            src_batch: torch.Tensor = batch.get("src")
+            tgt_batch: torch.Tensor = batch.get("tgt")
+            if src_batch is None or tgt_batch is None:
+                logger.warning("Batch does not contain 'src' and 'tgt' keys. Skipping this batch.")
+                continue
+
+            batch_size: int = src_batch.size(0)
+            # Process each example in the batch individually.
+            for i in range(batch_size):
+                src_example: torch.Tensor = src_batch[i].unsqueeze(0)  # Shape: (1, src_seq_len)
+                tgt_example: List[int] = tgt_batch[i].tolist()
+
+                # Record decoding start time.
+                start_time: float = time.time()
+                # Decode candidate sequence using beam search.
+                predicted_tokens: List[int] = self.beam_search(src_example)
+                elapsed: float = time.time() - start_time
+                inference_times.append(elapsed)
+
+                # Decode token sequences to strings.
+                candidate_str: str = self.decode_sequence(predicted_tokens)
+                reference_str: str = self.decode_sequence(tgt_example)
+
+                candidate_texts.append(candidate_str)
+                reference_texts.append(reference_str)
+
+        # Compute average inference time per example.
+        avg_inference_time: float = sum(inference_times) / len(inference_times) if inference_times else 0.0
+        
+        results: Dict[str, float] = {}
+        if self.task in ["wmt_en_de", "wmt_en_fr"]:
+            bleu_score: float = self._compute_bleu(candidate_texts, reference_texts)
+            results["BLEU"] = bleu_score
+            results["avg_inference_time"] = avg_inference_time
+            logger.info(f"Translation Evaluation - BLEU: {bleu_score:.4f}, Avg Inference Time: {avg_inference_time:.4f} sec")
+        elif self.task == "wsj":
+            f1_score: float = self._compute_f1(candidate_texts, reference_texts)
+            results["F1"] = f1_score
+            results["avg_inference_time"] = avg_inference_time
+            logger.info(f"Parsing Evaluation - F1: {f1_score:.2f}%, Avg Inference Time: {avg_inference_time:.4f} sec")
+        else:
+            logger.error(f"Unsupported task type '{self.task}' for evaluation metrics.")
+            raise ValueError(f"Unsupported task type '{self.task}'.")
+
+        return results
+```

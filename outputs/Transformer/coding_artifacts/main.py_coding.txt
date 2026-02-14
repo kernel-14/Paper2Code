@@ -1,0 +1,113 @@
+```python
+#!/usr/bin/env python
+"""
+main.py - Logic Analysis for Main Entry Point
+
+This file orchestrates the overall workflow for reproducing the Transformer experiments,
+following the paper “Attention Is All You Need”. It performs the following steps:
+  1. Load configuration from "config.yaml"
+  2. Instantiate the DatasetLoader to load training, validation, and test data.
+  3. Instantiate the Transformer Model with parameters from the configuration.
+  4. Create the Trainer instance and run the training loop.
+  5. After training, instantiate the Evaluation instance and run evaluation
+     (beam search based inference and metric computation).
+  6. Report final evaluation metrics.
+
+All configuration settings are loaded from config.yaml. Default values are set where necessary.
+"""
+
+import os
+import logging
+import yaml
+from typing import Dict, Any
+
+import torch
+
+# Import custom modules from the project.
+from dataset_loader import DatasetLoader
+from model import Model
+from trainer import Trainer
+from evaluation import Evaluation
+
+
+class Main:
+    """
+    Main class coordinates the experiment by loading configuration, data, model, trainer,
+    and evaluation modules and then running training and evaluation.
+    """
+
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initializes Main with the given configuration.
+
+        Args:
+            config: Configuration dictionary loaded from config.yaml.
+        """
+        self.config: Dict[str, Any] = config
+
+        # Initialize logger.
+        self.logger: logging.Logger = logging.getLogger(__name__)
+        self.logger.info("Main entry point initialized with provided configuration.")
+
+        # Determine computational device.
+        self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.logger.info(f"Using device: {self.device}")
+
+    def run_experiment(self) -> None:
+        """
+        Coordinates the experiment: data loading, model instantiation, training, and evaluation.
+        """
+        # 1. Data Loading
+        self.logger.info("Loading data...")
+        dataset_loader: DatasetLoader = DatasetLoader(self.config)
+        train_loader, val_loader, test_loader = dataset_loader.load_data()
+        self.logger.info("Data loaded successfully.")
+        
+        # 2. Model Instantiation
+        self.logger.info("Initializing model...")
+        model: Model = Model(self.config)
+        model.to(self.device)
+        self.logger.info("Model initialized and moved to device.")
+
+        # 3. Trainer Initialization and Training
+        self.logger.info("Initializing trainer...")
+        trainer: Trainer = Trainer(model, train_loader, val_loader, self.config)
+        self.logger.info("Starting training...")
+        trainer.train()
+        self.logger.info("Training completed.")
+
+        # 4. Evaluation
+        self.logger.info("Starting evaluation...")
+        evaluator: Evaluation = Evaluation(model, test_loader, self.config)
+        metrics: Dict[str, float] = evaluator.evaluate()
+        self.logger.info("Evaluation completed.")
+        print("Evaluation Metrics:", metrics)
+
+
+def main() -> None:
+    """
+    Main function that loads configuration, creates an instance of Main, and runs the experiment.
+    """
+    # Load configuration from 'config.yaml'
+    config_file: str = "config.yaml"
+    if not os.path.exists(config_file):
+        raise FileNotFoundError("Configuration file 'config.yaml' not found.")
+    
+    with open(config_file, "r") as f:
+        config: Dict[str, Any] = yaml.safe_load(f)
+
+    # Set default task if not specified in config.
+    if "task" not in config:
+        config["task"] = "wmt_en_de"  # Default task is WMT 2014 English-to-German
+
+    # Optional: provide default logging format and level.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    
+    # Instantiate Main and run the experiment.
+    main_app: Main = Main(config)
+    main_app.run_experiment()
+
+
+if __name__ == "__main__":
+    main()
+```

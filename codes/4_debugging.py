@@ -123,7 +123,19 @@ def parse_args() -> argparse.Namespace:
 
 
 args = parse_args()
-client = OpenAI(api_key = os.environ["OPENAI_API_KEY"])
+# 支持自定义 API 基础 URL
+client_kwargs = {"api_key": os.environ["OPENAI_API_KEY"]}
+api_base = os.environ.get("OPENAI_API_BASE")
+if api_base:
+    # 确保 URL 格式正确，添加 /v1 后缀（如果还没有）
+    if not api_base.endswith('/v1'):
+        api_base = api_base.rstrip('/') + '/v1'
+    client_kwargs["base_url"] = api_base
+    print(f"[INFO] 使用自定义 API 基础 URL: {api_base}", file=sys.stderr)
+else:
+    print(f"[INFO] 使用官方 OpenAI API", file=sys.stderr)
+
+client = OpenAI(**client_kwargs)
 
 if not os.path.exists(args.error_file_name):
     raise FileNotFoundError(f"Error file not found: {args.error_file_name}")

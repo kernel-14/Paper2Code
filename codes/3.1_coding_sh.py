@@ -18,7 +18,19 @@ parser.add_argument('--output_dir',type=str, default="")
 parser.add_argument('--output_repo_dir',type=str, default="")
 
 args    = parser.parse_args()
-client = OpenAI(api_key = os.environ["OPENAI_API_KEY"])
+# 支持自定义 API 基础 URL
+client_kwargs = {"api_key": os.environ["OPENAI_API_KEY"]}
+api_base = os.environ.get("OPENAI_API_BASE")
+if api_base:
+    # 确保 URL 格式正确，添加 /v1 后缀（如果还没有）
+    if not api_base.endswith('/v1'):
+        api_base = api_base.rstrip('/') + '/v1'
+    client_kwargs["base_url"] = api_base
+    print(f"[INFO] 使用自定义 API 基础 URL: {api_base}", file=sys.stderr)
+else:
+    print(f"[INFO] 使用官方 OpenAI API", file=sys.stderr)
+
+client = OpenAI(**client_kwargs)
 
 paper_name = args.paper_name
 gpt_version = args.gpt_version
@@ -114,6 +126,45 @@ def api_call(msg):
             messages=msg
         )
     return completion
+
+
+def convert_completion_to_json(completion):
+    """处理不同API端点返回的响应格式"""
+    import sys
+    
+    # 检查是否已经是dict
+    if isinstance(completion, dict):
+        return completion
+    
+    # 检查是否是字符串
+    if isinstance(completion, str):
+        # 尝试解析JSON
+        try:
+            return json.loads(completion)
+        except json.JSONDecodeError as e:
+            print(f"[DEBUG] 字符串解析失败: {e}", file=sys.stderr)
+            print(f"[DEBUG] 返回值内容: {completion[:500]}", file=sys.stderr)
+            raise
+    
+    # 检查是否是对象
+    try:
+        # 尝试调用 model_dump_json()
+        if hasattr(completion, 'model_dump_json'):
+            return json.loads(completion.model_dump_json())
+        # 尝试调用 model_dump()
+        elif hasattr(completion, 'model_dump'):
+            return completion.model_dump()
+        # 尝试调用 dict()
+        elif hasattr(completion, '__dict__'):
+            return vars(completion)
+        else:
+            # 最后的尝试：直接转换为JSON字符串
+            print(f"[DEBUG] 未知对象类型: {type(completion)}", file=sys.stderr)
+            print(f"[DEBUG] 对象内容: {str(completion)[:500]}", file=sys.stderr)
+            raise TypeError(f"无法转换类型 {type(completion)} 到 JSON")
+    except Exception as e:
+        print(f"[DEBUG] 对象转换失败: {e}", file=sys.stderr)
+        raise
     
 
 artifact_output_dir=f'{output_dir}/coding_artifacts'
@@ -147,7 +198,7 @@ for todo_idx, todo_file_name in enumerate(["reproduce.sh"]):
     # print(completion.choices[0].message)
     
     # response
-    completion_json = json.loads(completion.model_dump_json())
+    completion_json = convert_completion_to_json(completion)
     responses.append(completion_json)
 
     # trajectories
@@ -168,7 +219,7 @@ for todo_idx, todo_file_name in enumerate(["reproduce.sh"]):
     total_accumulated_cost = temp_total_accumulated_cost
 
     # save artifacts
-    with open(f'{artifact_output_dir}/{save_todo_file_name}_coding.txt', 'w') as f:
+    with open(f'{artifact_output_dir}/{save_todo_file_name}_coding.txt', 'w', encoding='utf-8') as f:
         f.write(completion_json['choices'][0]['message']['content'])
 
 
@@ -182,7 +233,7 @@ for todo_idx, todo_file_name in enumerate(["reproduce.sh"]):
         todo_file_dir = '/'.join(todo_file_name.split("/")[:-1])
         os.makedirs(f"{output_repo_dir}/{todo_file_dir}", exist_ok=True)
 
-    with open(f"{output_repo_dir}/{todo_file_name}", 'w') as f:
+    with open(f"{output_repo_dir}/{todo_file_name}", 'w', encoding='utf-8') as f:
         f.write(code)
 
 save_accumulated_cost(f"{output_dir}/accumulated_cost.json", total_accumulated_cost)

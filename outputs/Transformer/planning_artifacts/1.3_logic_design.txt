@@ -1,0 +1,39 @@
+----------------------------------------
+[Required packages]
+- numpy==1.21.0
+- torch==1.9.0
+- tqdm==4.62.3
+- sentencepiece==0.1.96
+
+----------------------------------------
+[Required Other language third-party packages]
+- No third-party dependencies required
+
+----------------------------------------
+[Logic Analysis]
+- ['dataset_loader.py', 'DatasetLoader class: Handles loading and preprocessing of datasets (WMT 2014 EN-DE, EN-FR, and WSJ for parsing). Implements tokenization using SentencePiece or another BPE/word-piece library, batching by sequence lengths, and returns train/validation/test splits. Depends on PyTorch DataLoader for efficient batching.']
+- ['model.py', 'Model class and its subcomponents: Implements the Transformer architecture including Embedding layers with sinusoidal positional encodings, MultiHeadAttention module (with scaled dot-product attention, masking for decoder self-attention), Encoder and Decoder stacks (each with residual connections, layer normalization, and position-wise feedforward networks). All modules are designed using PyTorch and are interdependent (e.g., the encoder feeds into the decoder).']
+- ['trainer.py', 'Trainer class: Encapsulates the training loop logic including loss computation with label smoothing, optimizer setup (Adam with specified hyperparameters), dynamic learning rate scheduler (linear warmup and inverse square-root decay), checkpoint saving/averaging, and logging of training metrics. Relies on Model from model.py and dataset provided by DatasetLoader.']
+- ['evaluation.py', 'Evaluation class: Handles model evaluation by performing inference using beam search (with configurable beam size, length penalty, and maximum sequence length) and computes evaluation metrics (BLEU for translation, F1 score for constituency parsing). Interfaces with the Model class and uses test data from the DatasetLoader.']
+- ['main.py', 'Main entry point: Coordinates the entire system. Loads configuration settings, instantiates the DatasetLoader to load data, creates the Model, initializes the Trainer for training, and finally triggers evaluation using the Evaluation class. Manages overall workflow and dependency injection among components.']
+
+----------------------------------------
+[Task list]
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+- main.py
+
+----------------------------------------
+[Full API spec]
+
+
+----------------------------------------
+[Shared Knowledge]
+Common configuration settings (hyperparameters, file paths, tokenization parameters, checkpoint intervals) are shared among all modules. Utility functions for logging, metric computation, and checkpoint management should be centralized and imported into trainer.py and evaluation.py. Consistent use of PyTorch Tensors and DataLoader objects is required across dataset_loader.py, model.py, and trainer.py.
+
+----------------------------------------
+[Anything UNCLEAR]
+Further clarification is needed on the exact dataset file formats and tokenization implementation details (e.g., preferred SentencePiece model parameters), as well as specifics on hardware configurations for large-scale training (e.g., checkpoint saving frequency and multi-GPU setup details).
+

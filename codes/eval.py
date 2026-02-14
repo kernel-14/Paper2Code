@@ -6,11 +6,63 @@ import argparse
 from utils import read_python_files, extract_planning, content_to_json, \
         num_tokens_from_messages, read_all_files, extract_json_from_string, get_now_str, print_log_cost
 
-client = OpenAI(api_key = os.environ["OPENAI_API_KEY"])
+# 支持自定义 API 基础 URL
+client_kwargs = {"api_key": os.environ["OPENAI_API_KEY"]}
+api_base = os.environ.get("OPENAI_API_BASE")
+if api_base:
+    # 确保 URL 格式正确，添加 /v1 后缀（如果还没有）
+    if not api_base.endswith('/v1'):
+        api_base = api_base.rstrip('/') + '/v1'
+    client_kwargs["base_url"] = api_base
+    print(f"[INFO] 使用自定义 API 基础 URL: {api_base}", file=sys.stderr)
+else:
+    print(f"[INFO] 使用官方 OpenAI API", file=sys.stderr)
+
+client = OpenAI(**client_kwargs)
 
 def api_call(request_json):
     completion = client.chat.completions.create(**request_json)
     return completion
+
+
+def convert_completion_to_json(completion):
+    """处理不同API端点返回的响应格式"""
+    import sys
+    
+    # 检查是否已经是dict
+    if isinstance(completion, dict):
+        return completion
+    
+    # 检查是否是字符串
+    if isinstance(completion, str):
+        # 尝试解析JSON
+        try:
+            return json.loads(completion)
+        except json.JSONDecodeError as e:
+            print(f"[DEBUG] 字符串解析失败: {e}", file=sys.stderr)
+            print(f"[DEBUG] 返回值内容: {completion[:500]}", file=sys.stderr)
+            raise
+    
+    # 检查是否是对象
+    try:
+        # 尝试调用 model_dump_json()
+        if hasattr(completion, 'model_dump_json'):
+            return json.loads(completion.model_dump_json())
+        # 尝试调用 model_dump()
+        elif hasattr(completion, 'model_dump'):
+            return completion.model_dump()
+        # 尝试调用 dict()
+        elif hasattr(completion, '__dict__'):
+            return vars(completion)
+        else:
+            # 最后的尝试：直接转换为JSON字符串
+            print(f"[DEBUG] 未知对象类型: {type(completion)}", file=sys.stderr)
+            print(f"[DEBUG] 对象内容: {str(completion)[:500]}", file=sys.stderr)
+            raise TypeError(f"无法转换类型 {type(completion)} 到 JSON")
+    except Exception as e:
+        print(f"[DEBUG] 对象转换失败: {e}", file=sys.stderr)
+        raise
+
 
 def main(args):
 
@@ -136,7 +188,7 @@ def main(args):
         }
         
     completion = api_call(request_json)
-    completion_json = json.loads(completion.model_dump_json())
+    completion_json = convert_completion_to_json(completion)
         
     score_key = "score"
     rationale_key = "critique_list"

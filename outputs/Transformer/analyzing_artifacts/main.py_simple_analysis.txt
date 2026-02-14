@@ -1,0 +1,144 @@
+/**************************************************
+ * main.py - Logic Analysis for Main Entry Point *
+ *                                                *
+ * This file orchestrates the overall workflow    *
+ * for reproducing the Transformer experiments,   *
+ * following the paper “Attention Is All You Need”. *
+ *                                                *
+ * The following steps outline the logic:         *
+ **************************************************/
+
+/*
+1. Load Configuration:
+   - At the very start, read the configuration file "config.yaml"
+     using a YAML parser. The resulting config dictionary will contain:
+       • Training parameters (train_steps, big_train_steps, gpu_count,
+         optimizer settings, learning rate scheduling details, warmup_steps)
+       • Model hyperparameters (num_layers, d_model, d_ff, num_heads, dropout,
+         label_smoothing, positional_encoding)
+       • Data parameters (tokens_per_batch, tokenization method, vocabulary sizes)
+       • Checkpoint settings (interval_minutes)
+       • Inference settings for both translation and parsing (beam_size, length_penalty,
+         max_length_offset)
+   - This configuration is critical and must be passed to every module
+     to maintain consistency with the original experimental setup.
+
+2. Instantiate and Load Data Using DatasetLoader:
+   - Create an instance of the DatasetLoader class, providing it with the loaded config.
+   - Call the load_data() function on this instance. This function should:
+       • Tokenize the datasets appropriately (using SentencePiece for BPE/WordPiece,
+         as specified by config.data.tokenization).
+       • Handle both machine translation datasets (WMT 2014 English-to-German and
+         English-to-French) and the WSJ corpus for constituency parsing.
+       • Dynamically batch the data using the approximate tokens_per_batch
+         (around 25,000 tokens for source and target each).
+   - Retrieve the outputs: (train_data, val_data, test_data).
+   - Ensure that the returned datasets are in a format compatible with PyTorch’s DataLoader
+     (e.g., list of tensors or preconfigured DataLoader objects).
+
+3. Instantiate the Model:
+   - Create an instance of the Model class defined in model.py.
+   - Pass the model parameter settings from config["model"] to the Model’s constructor.
+     These parameters include:
+       • num_layers (default 6 for the base model)
+       • d_model (512)
+       • d_ff (2048)
+       • num_heads (8)
+       • dropout (0.1)
+       • label_smoothing (0.1)
+       • positional_encoding type ("sinusoidal")
+   - The Model class should internally construct:
+       • The embedding layers with sinusoidal positional encodings.
+       • The multi-head attention modules (including scaling, masking for decoder self-attention).
+       • The position-wise feed-forward networks.
+       • The encoder and decoder stacks with proper residual connections and layer normalization.
+   - The forward() method of the model will later be used by both training and evaluation.
+
+4. Instantiate the Trainer:
+   - Create an instance of the Trainer class from trainer.py.
+   - Pass the previously instantiated Model, train_data, and val_data, as well as the training-related
+     configuration (from config["training"] and possibly additional relevant keys from config["checkpoint"]).
+   - The Trainer is responsible for:
+       • Managing the training loop.
+       • Computing the loss (including label smoothing as per config.model.label_smoothing).
+       • Updating weights using the Adam optimizer with:
+             - β1 = 0.9, β2 = 0.98, ϵ = 1e-9 (from config.training.optimizer)
+       • Applying the dynamic learning rate scheduler:
+             - A linear warmup for the first warmup_steps (4000) followed by inverse square-root decay.
+             - The learning rate formula is defined in the config.
+       • Implementing dropout at the sub-layer outputs and embedding sums (dropout rate 0.1).
+       • Checkpoint saving at an interval defined in config.checkpoint.interval_minutes.
+       • Possibly checkpoint averaging at the end of training, as described in the paper.
+   - The Trainer’s train() method will perform the iterative updates.
+   - During each iteration, it will:
+       • Fetch a batch from train_data using the DataLoader.
+       • Compute predictions via Model.forward() using appropriate attention masks.
+       • Calculate loss, backpropagate, and update parameters.
+
+5. Run Training:
+   - Invoke trainer.train() to start the training process.
+   - Training should run for a total number of steps:
+       • For the base model: config.training.train_steps (100,000)
+       • For the “big” model (if chosen): config.training.big_train_steps (300,000)
+   - Throughout training, log key metrics (e.g., loss, perplexity, step time) to track progress.
+   - Ensure proper handling of multi-GPU settings using config.training.gpu_count (8 GPUs).
+
+6. Post-Training Evaluation Setup:
+   - After training is complete (or when desired for evaluation),
+     instantiate the Evaluation class from evaluation.py.
+   - Pass the Model (ideally, the best or averaged checkpoint — using Model.load_model() if needed),
+     test_data from DatasetLoader, and inference-specific configuration from config["inference"].
+   - Note:
+       • For translation tasks, use:
+             - Beam search with beam_size = 4,
+             - Length penalty = 0.6,
+             - Maximum output length offset = 50.
+       • For constituency parsing, use:
+             - Beam search with beam_size = 21,
+             - Length penalty = 0.3,
+             - Maximum output length offset = 300.
+
+7. Run Evaluation:
+   - Call the Evaluation.evaluate() method.
+   - This function should:
+       • Invoke Model.forward() on batched test data.
+       • Apply beam search (with proper masking and early termination logic as per the design note)
+         to generate sequences.
+       • Compute task-specific metrics:
+             - BLEU scores for machine translation tasks.
+             - F1 scores for constituency parsing tasks.
+   - The resulting metrics (a dictionary of metric names and values) should be returned.
+
+8. Final Reporting and Cleanup:
+   - Print or log the evaluation metrics to summarize the experiment’s performance.
+   - Optionally, save the final metrics and any relevant experiment details (such as training time,
+     checkpoints used, hyperparameter details) for later analysis.
+   - End the execution of the program.
+
+Additional Considerations:
+   - Dependency Injection:
+       • The Main class (or main function) coordinates the instantiation and interaction
+         of DatasetLoader, Model, Trainer, and Evaluation.
+       • Each component receives the full config to ensure consistency.
+   - Error Handling:
+       • Ensure that configuration file reading, dataset loading, and model checkpointing
+         include proper error handling and logging.
+   - Multi-GPU Concerns:
+       • Although not elaborated in this analysis, be mindful of moving the model and data
+         to the correct device(s) based on config.training.gpu_count.
+   - Modularity:
+       • The design specified that each module has specific function signatures.
+         Do not introduce extra public member functions; adhere to the provided design.
+   - Future Enhancements:
+       • Allow command-line flags to toggle training only versus evaluation mode.
+       • Implement checkpoint averaging as a separate function if needed to cleanly reload the best model.
+
+Conclusion:
+   - main.py serves as the central coordinator:
+       • It loads configuration,
+       • Instantiates and connects DatasetLoader, Model, Trainer, and Evaluation,
+       • Executes training according to the Transformer paper’s experimental setup,
+       • And finally triggers evaluation reporting BLEU (or F1) metrics.
+   - All implementation choices strictly follow the paper’s methodology and the design constraints
+     to ensure fidelity and reproducibility of the experiments.
+**************************************************/

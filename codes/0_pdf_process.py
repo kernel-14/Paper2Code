@@ -1,6 +1,7 @@
 import json
 import argparse
 
+
 def remove_spans(data):
     # If data is a dictionary, recursively check its keys
     if isinstance(data, dict):
@@ -26,7 +27,7 @@ def main(args):
     cleaned_data = remove_spans(data)
 
     print(f"[SAVED] {output_json_path}")
-    with open(output_json_path, 'w') as f:
+    with open(output_json_path, 'w', encoding='utf-8') as f:
         json.dump(cleaned_data, f)
 
 

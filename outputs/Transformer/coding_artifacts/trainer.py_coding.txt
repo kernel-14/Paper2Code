@@ -1,0 +1,262 @@
+```python
+## trainer.py
+import os
+import math
+import time
+import logging
+from typing import Any, Dict
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from tqdm import tqdm
+
+# Set up logging configuration.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class Trainer:
+    """
+    Trainer class encapsulates the training loop for the Transformer model.
+    
+    Attributes:
+        model: The Transformer model instance.
+        train_data: Training data loader.
+        val_data: Validation data loader.
+        config: Configuration dictionary.
+        total_steps: Total training steps from configuration.
+        warmup_steps: Warmup steps for the learning rate scheduler.
+        d_model: Model dimensionality.
+        label_smoothing: Label smoothing factor.
+        pad_id: ID for padding token.
+        optimizer: Adam optimizer initialized with model parameters.
+        step_num: Current training step counter.
+        last_checkpoint_time: Last time (in seconds) a checkpoint was saved.
+        checkpoint_interval_seconds: Seconds between successive checkpoints.
+        vocab_size: Vocabulary size extracted from the model's embedding.
+    """
+
+    def __init__(self, model: nn.Module, train_data: Any, val_data: Any, config: Dict[str, Any]) -> None:
+        """
+        Initializes the Trainer with the model, training/validation data, and configuration.
+
+        Args:
+            model: Instance of the Transformer Model.
+            train_data: Training data loader.
+            val_data: Validation data loader.
+            config: Dictionary configuration loaded from config.yaml.
+        """
+        self.model: nn.Module = model
+        self.train_data: Any = train_data
+        self.val_data: Any = val_data
+        self.config: Dict[str, Any] = config
+
+        # Retrieve training hyperparameters from configuration with defaults.
+        training_cfg: Dict[str, Any] = self.config.get("training", {})
+        self.total_steps: int = training_cfg.get("train_steps", 100000)
+        lr_cfg: Dict[str, Any] = training_cfg.get("learning_rate", {})
+        self.warmup_steps: int = lr_cfg.get("warmup_steps", 4000)
+
+        model_cfg: Dict[str, Any] = self.config.get("model", {})
+        self.d_model: int = model_cfg.get("d_model", 512)
+        self.label_smoothing: float = model_cfg.get("label_smoothing", 0.1)
+
+        # Retrieve special tokens; default pad_id is 0.
+        self.pad_id: int = self.config.get("special_tokens", {}).get("pad_id", 0)
+
+        # Retrieve optimizer hyperparameters.
+        optimizer_cfg: Dict[str, Any] = training_cfg.get("optimizer", {})
+        beta1: float = optimizer_cfg.get("beta1", 0.9)
+        beta2: float = optimizer_cfg.get("beta2", 0.98)
+        epsilon: float = optimizer_cfg.get("epsilon", 1e-9)
+
+        # Compute initial learning rate using step=1.
+        initial_lr: float = self.compute_learning_rate(1)
+
+        # Initialize Adam optimizer with model parameters.
+        self.optimizer: optim.Optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=initial_lr,
+            betas=(beta1, beta2),
+            eps=epsilon
+        )
+
+        # Initialize training step counter.
+        self.step_num: int = 0
+
+        # Checkpointing settings.
+        checkpoint_cfg: Dict[str, Any] = self.config.get("checkpoint", {})
+        interval_minutes: float = checkpoint_cfg.get("interval_minutes", 10)
+        self.checkpoint_interval_seconds: float = interval_minutes * 60.0
+        self.last_checkpoint_time: float = time.time()
+
+        # Retrieve vocabulary size from the model's embedding.
+        self.vocab_size: int = self.model.embedding.num_embeddings
+
+        logger.info(f"Trainer initialized with total_steps: {self.total_steps}, "
+                    f"warmup_steps: {self.warmup_steps}, d_model: {self.d_model}, "
+                    f"label_smoothing: {self.label_smoothing}, pad_id: {self.pad_id}.")
+
+    def compute_learning_rate(self, step: int) -> float:
+        """
+        Computes the learning rate at a given step using the schedule:
+            lr = d_model^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
+
+        Args:
+            step: Current training step (must be >= 1).
+
+        Returns:
+            The computed learning rate.
+        """
+        if step < 1:
+            step = 1
+        lr: float = (self.d_model ** -0.5) * min(step ** -0.5, step * (self.warmup_steps ** -1.5))
+        return lr
+
+    def label_smoothing_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Computes loss using label smoothing.
+
+        Args:
+            predictions: Logits output from the model of shape (batch_size, seq_len, vocab_size).
+            targets: Ground-truth token IDs of shape (batch_size, seq_len).
+
+        Returns:
+            Computed loss (a scalar tensor).
+        """
+        # Get dimensions.
+        batch_size, seq_len, vocab_size = predictions.size()
+
+        # Compute log probabilities.
+        log_probs: torch.Tensor = F.log_softmax(predictions, dim=-1)
+
+        # Create one-hot encoding of targets.
+        with torch.no_grad():
+            # Use float type for one_hot.
+            targets_one_hot: torch.Tensor = F.one_hot(targets, num_classes=vocab_size).float()
+            # Apply label smoothing: correct class gets (1 - label_smoothing) and others get label_smoothing/(vocab_size - 1)
+            smooth_value: float = self.label_smoothing / (vocab_size - 1)
+            smoothed_targets: torch.Tensor = targets_one_hot * (1.0 - self.label_smoothing) + smooth_value
+
+            # Create a mask to ignore pad tokens.
+            pad_mask: torch.Tensor = targets.eq(self.pad_id)
+            # Expand mask to shape (batch_size, seq_len, vocab_size)
+            pad_mask_expanded: torch.Tensor = pad_mask.unsqueeze(-1).expand_as(smoothed_targets)
+            # For pad tokens, set the target distribution to 0.
+            smoothed_targets.masked_fill_(pad_mask_expanded, 0)
+
+        # Compute KL divergence loss (i.e., cross entropy with soft targets).
+        # Loss shape (batch_size, seq_len)
+        loss_tensor: torch.Tensor = -torch.sum(smoothed_targets * log_probs, dim=-1)
+
+        # Only average over non-pad tokens.
+        non_pad_mask: torch.Tensor = ~targets.eq(self.pad_id)
+        total_non_pad: float = non_pad_mask.sum().item()
+        if total_non_pad == 0:
+            total_non_pad = 1.0
+        loss: torch.Tensor = loss_tensor.masked_select(non_pad_mask).sum() / total_non_pad
+        return loss
+
+    def train(self) -> None:
+        """
+        Runs the training loop for total_steps. Updates the model parameters,
+        computes loss with label smoothing, dynamically adjusts learning rate,
+        and periodically saves checkpoints.
+        """
+        self.model.train()
+        # Set up progress bar.
+        pbar = tqdm(total=self.total_steps, desc="Training", ncols=100)
+        running_loss: float = 0.0
+        log_interval: int = 100  # Log every 100 training steps.
+
+        while self.step_num < self.total_steps:
+            for batch in self.train_data:
+                self.step_num += 1
+
+                # Zero gradients.
+                self.optimizer.zero_grad()
+
+                # Forward pass; batch is expected to be a dictionary with "src" and "tgt" keys.
+                try:
+                    predictions: torch.Tensor = self.model(batch)
+                except Exception as e:
+                    logger.error(f"Error during model forward pass at step {self.step_num}: {e}")
+                    raise e
+
+                # Compute loss with label smoothing loss function.
+                targets: torch.Tensor = batch.get("tgt")
+                loss: torch.Tensor = self.label_smoothing_loss(predictions, targets)
+                running_loss += loss.item()
+
+                # Backward pass and optimizer step.
+                loss.backward()
+                self.optimizer.step()
+
+                # Update learning rate using the custom schedule.
+                current_lr: float = self.compute_learning_rate(self.step_num)
+                for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = current_lr
+
+                # Logging at intervals.
+                if self.step_num % log_interval == 0:
+                    avg_loss: float = running_loss / log_interval
+                    try:
+                        perplexity: float = math.exp(avg_loss)
+                    except OverflowError:
+                        perplexity = float("inf")
+                    logger.info(f"Step {self.step_num}: Loss = {avg_loss:.4f}, Perplexity = {perplexity:.4f}, LR = {current_lr:.8f}")
+                    running_loss = 0.0
+
+                # Update progress bar.
+                pbar.update(1)
+                pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{current_lr:.8f}"})
+
+                # Checkpoint saving based on time interval.
+                current_time: float = time.time()
+                if (current_time - self.last_checkpoint_time) >= self.checkpoint_interval_seconds:
+                    checkpoint_path: str = os.path.join("checkpoints", f"checkpoint_step_{self.step_num}.pt")
+                    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                    self.save_checkpoint(checkpoint_path)
+                    logger.info(f"Checkpoint saved at step {self.step_num} to '{checkpoint_path}'.")
+                    self.last_checkpoint_time = current_time
+
+                # Break out of the inner loop if training is finished.
+                if self.step_num >= self.total_steps:
+                    break
+
+        pbar.close()
+        logger.info("Training completed.")
+
+    def save_checkpoint(self, path: str) -> None:
+        """
+        Saves the current model and optimizer state along with the training step number.
+
+        Args:
+            path: File path to save the checkpoint.
+        """
+        checkpoint_state: Dict[str, Any] = {
+            "model_state": self.model.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "step_num": self.step_num,
+        }
+        torch.save(checkpoint_state, path)
+        logger.info(f"Checkpoint saved successfully to '{path}'.")
+
+    def load_checkpoint(self, path: str) -> None:
+        """
+        Loads the model and optimizer state from a checkpoint file and resumes training step counter.
+
+        Args:
+            path: File path from which to load the checkpoint.
+        """
+        if not os.path.exists(path):
+            logger.error(f"Checkpoint file '{path}' does not exist.")
+            raise FileNotFoundError(f"Checkpoint file '{path}' does not exist.")
+        checkpoint_state: Dict[str, Any] = torch.load(path, map_location=torch.device("cpu"))
+        self.model.load_state_dict(checkpoint_state.get("model_state", {}))
+        self.optimizer.load_state_dict(checkpoint_state.get("optimizer_state", {}))
+        self.step_num = checkpoint_state.get("step_num", 0)
+        logger.info(f"Checkpoint loaded successfully from '{path}'. Resumed at step {self.step_num}.")
+```

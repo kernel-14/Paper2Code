@@ -1,0 +1,118 @@
+Below is the detailed logic analysis for evaluation.py. This analysis explains how the Evaluation class will work, including beam search inference, metric computation, and how all configuration settings (from config.yaml) and design constraints are integrated.
+
+──────────────────────────────
+1. OVERVIEW
+
+• The Evaluation class is responsible for taking the saved (or trained) Model and test data (loaded via DatasetLoader) to run inference.  
+• It implements beam search decoding with parameters (beam size, length penalty, maximum output length) that are chosen from the configuration (separate settings for translation and parsing).  
+• Post decoding, the Evaluation class computes the appropriate metrics: BLEU scores for translation tasks and F1 scores for constituency parsing.
+
+──────────────────────────────
+2. INITIALIZATION
+
+• __init__(model: Model, test_data: Any, config: dict)  
+ – Store model, test_data, and the configuration dictionary as instance variables.  
+ – Set the model to evaluation mode (model.eval()) to disable dropout and gradient tracking.  
+ – Extract inference parameters from the config. Depending on the task (translation or parsing) you may have:
+  – For translation: beam_size, length_penalty, and max_length_offset = config.inference.translation...  
+  – For parsing: corresponding beam_size, length_penalty, and max_length_offset = config.inference.parsing...
+
+──────────────────────────────
+3. BEAM SEARCH INFERENCE
+
+The core of evaluation is generating predictions using beam search. The following steps outline the complete logic:
+
+A. Preprocessing and Setup:  
+ 1. For each test example (or batch), retrieve the input sequence and (if available) the reference target (for later metric computation).  
+ 2. Compute the maximum allowable output length as:  
+   max_length = len(input_sequence) + max_length_offset  
+  where max_length_offset is 50 for translation and 300 for parsing (from config).
+
+B. Beam Search Algorithm Process (for each example or batch):  
+ 1. Initialize the beam with the start token (this token is defined in your vocabulary or tokenization process – it must be consistent with what was used during training).  
+ 2. For every time step up to max_length:  
+  a. For each candidate sequence in the beam, feed the candidate (with proper decoder masking applied) into model.forward() to obtain the logits/probabilities for the next token.  
+  b. Apply the scaled dot-product attention mask in the decoder so that future tokens are not “seen” – note that this is already built into the Model’s forward method as per design.  
+  c. Compute the log-probabilities for each candidate token and update the cumulative score for each beam candidate.  
+  d. Incorporate the length penalty into the score. For each candidate, adjust the log-probability according to the configured length_penalty (e.g., using a formula such as: adjusted_score = log_prob / ( (5 + sequence_length) / 6 )^(length_penalty) ).  
+  e. Select the top “beam_size” candidate continuations (using beam_size from config) across all current candidates.  
+  f. Prune the beam to keep only these top candidates.  
+ 3. If all the candidates in the beam have generated an end-of-sequence token—or once the maximum output length is reached—the beam search loop terminates.  
+ 4. Among the completed candidate sequences, select the one with the best (adjusted) score as the final prediction for that example.
+
+C. Postprocessing:  
+ 1. Convert the predicted token indices to words/strings using the same tokenizer (or SentencePiece model) that was used during data loading.  
+ 2. Optionally, remove special tokens (like start-of-sequence and end-of-sequence markers) so that the prediction is directly comparable with the reference.
+
+──────────────────────────────
+4. METRIC COMPUTATION
+
+After generating predictions for all examples in the test set, metrics are computed as follows:
+
+A. For Translation Tasks (WMT 2014 EN-DE / EN-FR):  
+ 1. Compare the generated prediction strings to the reference translations.  
+ 2. Compute the BLEU score.  
+  – Use a standard BLEU computation (either by integrating a library or a custom implementation) that considers n-gram overlaps.  
+ 3. Gather the BLEU score (and possibly report additional statistics like average inference time per example).
+
+B. For Constituency Parsing Tasks:
+ 1. The predictions should be in the form of parse trees or bracketed representations.  
+ 2. Compare the predicted parses with the gold-standard references from WSJ.  
+ 3. Compute the F1 score using an appropriate tree evaluation method (for example, a script or library function that calculates labeled F1 based on precision and recall of correct constituents).
+
+C. Consolidate Results:  
+ – Return the evaluation results as a dictionary (e.g., {"BLEU": value} or {"F1": value}) so that these can be logged, displayed, or further used by the Main application.
+
+──────────────────────────────
+5. INTEGRATION WITH CONFIGURATION
+
+• All beam search parameters are read from the configuration file (config.yaml):  
+ – Inference parameters are split into two sub-sections: "inference.translation" and "inference.parsing".  
+ – Depending on which task is being evaluated, the Evaluation class should use the correct beam_size, length_penalty, and max_length_offset.  
+ – For example:  
+  – beam_size = config["inference"]["translation"]["beam_size"] for translation evaluation.  
+  – Similarly, use the parsing settings for constituency parsing evaluation.
+
+• No assumptions are made beyond what is provided in the config file. All numerical values (e.g., dropout, warmup_steps) are to be read from the config object where needed.
+
+──────────────────────────────
+6. PROGRAM FLOW & METHOD INTERACTIONS
+
+A. During Evaluation:  
+ – Main instantiates the Evaluation class and calls the evaluate() method.  
+ – The evaluate() method loops over test_data batches; for each batch, it calls the model’s forward method for inference (wrapped in a torch.no_grad() context).  
+ – The generated predictions for the batch are collected (and decoded).  
+ – After processing all batches, the metric computation is performed over the aggregated predictions and references.
+
+B. Interaction with Model and DatasetLoader:  
+ – Evaluation uses Model.forward() to run the beam search decoding on test inputs.  
+ – Test data is provided by DatasetLoader.  
+ – Predictions once generated may be compared to references that are part of the test data structure (as assumed in the DatasetLoader interface).
+
+──────────────────────────────
+7. ERROR HANDLING & PERFORMANCE CONSIDERATIONS
+
+• Use torch.no_grad() to disable gradient computations during evaluation.  
+• Set the model to evaluation mode using model.eval().  
+• Handle cases where beam search might not complete early (if no valid end-of-sequence token is detected before max_length).  
+• Log or print warnings if the candidate generation fails or if the number of decoded tokens is suspicious.  
+• Optionally, keep track of inference time per sample for performance diagnostics.
+
+──────────────────────────────
+8. SUMMARY
+
+The Evaluation class (evaluation.py) will:
+
+1. Initialize with model, test_data, and configuration settings.  
+2. Set the model to evaluation mode and extract beam search settings from config (choosing parameters based on whether the task is translation or parsing).  
+3. Iterate through test examples (or batches), applying a beam search decoding procedure that:  
+ – Starts with the start token,  
+ – Iteratively expands candidates using model.forward() (with the proper decoder mask),  
+ – Applies length penalty and prunes the beam to the top beam_size candidates,  
+ – Stops either when all candidates reach an end-of-sequence token or when reaching the maximum output length (input length + offset from config).  
+4. After decoding, convert the token indices to text and use the text predictions to compute:  
+ – BLEU score for translation tasks, or  
+ – F1 score for parsing tasks.  
+5. Return and log the metrics in a dictionary for downstream usage.
+
+This logic analysis strictly adheres to the design specifications and configuration provided and ensures that all experimental settings from the paper and configuration (config.yaml) are respected in the evaluation stage.

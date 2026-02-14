@@ -1,0 +1,96 @@
+Below is a detailed logic analysis for the dataset_loader.py module that implements the DatasetLoader class. This module is responsible for reading raw dataset files (WMT 2014 EN-DE, WMT 2014 EN-FR, and WSJ for constituency parsing), applying tokenization (using SentencePiece or a similar BPE/WordPiece method), grouping examples by similar sequence lengths, and creating dynamic PyTorch DataLoader objects that yield batches of tokenized data. All settings (batch size in tokens, vocabulary sizes, tokenization method, etc.) are taken directly from the configuration file (config.yaml).
+
+──────────────────────────────
+Overview
+
+• The DatasetLoader class will be initialized with a configuration dictionary that contains settings such as the tokenization method, vocabulary sizes (e.g., 37,000 for EN-DE, 32,000 for EN-FR, and 16K/32K for WSJ), and the approximate number of tokens per batch (25,000 tokens for each side).  
+• It will handle multiple target tasks (machine translation and constituency parsing) by supporting different file formats and splitting strategies. Although the exact file paths and splitting details are not prescribed in config.yaml, our design assumes these will be provided (or determined) externally.
+• The module will implement a custom collate function (or dynamic batching logic) so that examples are grouped by similar lengths to reduce padding overhead while ensuring that on average each batch contains around the defined number of tokens.
+• Finally, the load_data() method returns a tuple (train_data, val_data, test_data) where each element is a PyTorch DataLoader that efficiently iterates over the preprocessed dataset.
+
+──────────────────────────────
+Class Initialization (__init__)
+
+1. The constructor accepts a config dictionary:
+  – Save the config in an instance variable (self.config) so that any settings can be referenced later.
+  – Read the tokenization settings:
+   • tokenization.method (e.g., "BPE/WordPiece").
+   • vocabulary sizes (for example, en_de_vocab_size, en_fr_vocab_size, and wsj vocab sizes).
+  – Read the batching configuration (tokens_per_batch) from config.data.tokens_per_batch.
+  – (Optionally) Determine which dataset to load based on additional config settings or user input. This may affect which tokenization model or vocabulary is used.
+2. Tokenizer Initialization:
+  – Initialize SentencePieceProcessor objects for each dataset type (or one shared tokenizer if appropriate).  
+  – Load pre-trained SentencePiece model files if they exist; otherwise, decide whether to train a new model (this can be flagged as a future extension).  
+  – Store the tokenizer(s) in instance variables for later use during the tokenization phase.
+3. File Path / Data Source Setup:
+  – Although not explicitly detailed in config.yaml, the implementation should expect external file paths for the raw datasets.  
+  – These paths can be stored in the configuration or passed as additional parameters so that the loader knows where to find the training, validation, and test files.
+  – Log or print dataset sizes and expected splits for clarity.
+
+──────────────────────────────
+Method: load_data()
+
+This is the primary method that returns the dataset splits ready for batching. The steps involved are:
+
+1. Reading Raw Data:
+  – For each dataset (e.g., WMT 2014 EN-DE, WMT 2014 EN-FR, and WSJ parsing) the loader reads the raw text files.  
+  – Implement internal helper functions (e.g., load_file(filename)) to load the raw text lines.
+  – For translation tasks, each example is expected to be a pair (source sentence, target sentence). For parsing, each example may be a single sentence (or a sentence along with its tree structure, depending on how the task is framed).
+
+2. Tokenization:
+  – For each raw sentence (or pair), call a helper function (e.g., tokenize()) that passes the text through the SentencePieceProcessor.  
+  – The sentence is converted into a sequence of token IDs.  
+  – (Optionally) Special tokens such as start-of-sequence and end-of-sequence tokens may be added.
+  – The tokenizer should use the vocabulary size and other settings provided in the config (for EN-DE, EN-FR, or WSJ respectively).
+
+3. Data Splitting:
+  – Split the full dataset into training, validation, and test sets.  
+  – The exact ratio or splitting mechanism may be predetermined (for instance, if the dataset provides official splits) or handled via pre-specified file lists.
+  – Log the number of examples in each split for debugging and reproducibility.
+
+4. Dynamic Batching and Collate Function:
+  – Since the paper specifies that each training batch should contain roughly 25000 source tokens and 25000 target tokens, implement a dynamic batching strategy:
+   • Sort or bucket examples by sequence length to reduce padding overhead.
+   • Use a custom collate_fn that, for each batch, determines the maximum sequence length in that batch and pads all sequences accordingly.
+   • The batching logic should accumulate examples until the total number of tokens (or the sum over source and target separately) reaches approximately the threshold specified in config.data.tokens_per_batch.
+  – This batching logic may be implemented outside the DatasetLoader’s core “load_data” function and then passed to PyTorch DataLoader.
+
+5. Creating PyTorch DataLoader Objects:
+  – For each split (train, validation, and test), wrap the corresponding Dataset (a custom torch.utils.data.Dataset object that holds the tokenized examples) in a PyTorch DataLoader.  
+  – Set the DataLoader to use the custom collate_fn.  
+  – Define other parameters like shuffling (enabled for training) and the number of worker threads.
+  – Log the batch sizes and number of batches for further reference.
+
+6. Returning the DataLoaders:
+  – Finally, the load_data() method returns a tuple: (train_data, val_data, test_data) where each element is a DataLoader ready to be iterated over during training or evaluation.
+
+──────────────────────────────
+Integration Considerations
+
+• Consistency with Configurations:  
+  – Every numeric or string value (such as tokens_per_batch, vocabulary sizes, and dropout settings) must be referenced only from the config dictionary provided at initialization.  
+  – No assumptions should be made on hard-coded values.
+
+• Modularity and Reuse:  
+  – Utility functions (for tokenization, file reading, or batching) should be defined as internal helper functions so that other modules (such as trainer.py) may use similar routines if necessary.
+  – The DatasetLoader is designed to output PyTorch-compatible DataLoader objects, ensuring seamless integration with the Trainer’s loop.
+
+• Error Handling and Logging:  
+  – Include checks for file existence and proper tokenizer initialization.  
+  – Log issues with dataset sizes, tokenization errors, or batch formation to assist with debugging and reproducibility.
+
+• Extensibility for Multiple Tasks:  
+  – Although the current scope includes translation and constituency parsing, the design should be flexible enough to add more preprocessing routines or different batching strategies in the future without altering the overall interface defined in the classDiagram.
+
+──────────────────────────────
+Summary
+
+The dataset_loader.py module is tasked with:
+  – Reading raw dataset files (for both translation and parsing tasks).
+  – Tokenizing sentences using SentencePiece (with parameters drawn from config.yaml).
+  – Dynamically batching examples based on sequence length and a defined tokens-per-batch threshold.
+  – Creating train, validation, and test DataLoader objects using PyTorch for efficient data loading.
+
+This logical design ensures that the subsequent Trainer module can reliably iterate over well-prepared and efficiently batched data while the overall system remains faithful to the experimental setup described in “Attention Is All You Need.”
+
+All decisions—from tokenizer initialization to the collate function—will strictly reference the configuration file settings and align with the design and objectives laid out in the research paper reproduction plan.
