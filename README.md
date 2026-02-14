@@ -1,181 +1,87 @@
-# 📄 Paper2Code: Automating Code Generation from Scientific Papers in Machine Learning
+# 📄 Paper2Code: 从机器学习科学论文自动生成代码
 
-![PaperCoder Overview](./assets/papercoder_overview.png)
+![PaperCoder 概览](./assets/papercoder_overview.png)
 
-📄 [Read the paper on arXiv](https://arxiv.org/abs/2504.17192)
+📄 [在 arXiv 上阅读论文](https://arxiv.org/abs/2504.17192)
 
-**PaperCoder** is a multi-agent LLM system that transforms paper into a code repository.
-It follows a three-stage pipeline: planning, analysis, and code generation, each handled by specialized agents.  
-Our method outperforms strong baselines on both Paper2Code and PaperBench and produces faithful, high-quality implementations.
-
----
-
-## 🗺️ Table of Contents
-
-- [⚡ Quick Start](#-quick-start)
-- [📚 Detailed Setup Instructions](#-detailed-setup-instructions)
-- [📦 Paper2Code Benchmark Datasets](#-paper2code-benchmark-datasets)
-- [📊 Model-based Evaluation of Repositories](#-model-based-evaluation-of-repositories-generated-by-papercoder)
+**PaperCoder** 是一个多智能体 LLM 系统，可以将论文转变为代码库。
+它遵循三阶段管道：规划、分析和代码生成，每个阶段由专门的智能体处理。
+我们的方法在 Paper2Code 和 PaperBench 上都优于强基线，并生成忠实、高质量的实现。
 
 ---
 
-## ⚡ Quick Start
-- Note: The following command runs example paper ([Attention Is All You Need](https://arxiv.org/abs/1706.03762)).  
+## 🗺️ 目录
 
-### Using OpenAI API
-- 💵 Estimated cost for using o3-mini: $0.50–$0.70
+- [📄 Paper2Code: 从机器学习科学论文自动生成代码](#-paper2code-从机器学习科学论文自动生成代码)
+  - [🗺️ 目录](#️-目录)
+  - [⚡ 快速开始](#-快速开始)
+    - [使用 OpenAI API](#使用-openai-api)
+    - [输出文件夹结构（仅包含重要文件）](#输出文件夹结构仅包含重要文件)
+  - [📦 Paper2Code 基准数据集](#-paper2code-基准数据集)
+  - [📊 由 PaperCoder 生成的代码库的模型评估](#-由-papercoder-生成的代码库的模型评估)
+    - [🛠️ 环境配置](#️-环境配置)
+    - [📝 无参考评估](#-无参考评估)
+    - [📝 基于参考的评估](#-基于参考的评估)
+    - [📄 输出示例](#-输出示例)
 
+---
+
+## ⚡ 快速开始
+- 注意：以下命令运行示例论文 ([Attention Is All You Need](https://arxiv.org/abs/1706.03762))。  
+
+### 使用 OpenAI API
+- 💵 使用 o3-mini 的预计成本：$0.50–$0.70
+
+- ⭐ 修改了一部分代码，更方便在windows本地部署，原始代码请见原仓库
+
+-（新增功能）：使用.env管理api，请修改根目录下.env文件
+
+- 在powershell中
 ```bash
 pip install openai
-
-export OPENAI_API_KEY="<OPENAI_API_KEY>"
-
 cd scripts
-bash run.sh
+python run.py
 ```
 
-### Using Open Source Models with vLLM
-- If you encounter any issues installing vLLM, please refer to the [official vLLM repository](https://github.com/vllm-project/vllm).
-- The default model is `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`.
 
-```bash
-pip install vllm
-
-cd scripts
-bash run_llm.sh
-```
-
-### Output Folder Structure (Only Important Files)
+### 输出文件夹结构（仅包含重要文件）
 ```bash
 outputs
 ├── Transformer
 │   ├── analyzing_artifacts
 │   ├── coding_artifacts
 │   └── planning_artifacts
-└── Transformer_repo # Final output repository
+└── Transformer_repo # 最终输出代码库
 ```
 ---
 
-## 📚 Detailed Setup Instructions
-
-### 🛠️ Environment Setup
-
-- 💡 To use the `o3-mini` version, make sure you have the latest `openai` package installed.
-- 📦 Install only what you need:
-  - For OpenAI API: `openai`
-  - For open-source models: `vllm`
-      - If you encounter any issues installing vLLM, please refer to the [official vLLM repository](https://github.com/vllm-project/vllm).
-
-
-```bash
-pip install openai 
-pip install vllm 
-```
-
-- Or, if you prefer, you can install all dependencies using `pip`:
-
-```bash
-pip install -r requirements.txt
-```
-
-### 📄 (Option) Convert PDF to JSON
-The following process describes how to convert a paper PDF into JSON format.  
-If you have access to the LaTeX source and plan to use it with PaperCoder, you may skip this step and proceed to [🚀 Running PaperCoder](#-running-papercoder).  
-Note: In our experiments, we converted all paper PDFs to JSON format.
-
-1. Clone the `s2orc-doc2json` repository to convert your PDF file into a structured JSON format.  
-   (For detailed configuration, please refer to the [official repository](https://github.com/allenai/s2orc-doc2json).)
-
-```bash
-git clone https://github.com/allenai/s2orc-doc2json.git
-```
-
-2. Run the PDF processing service.
-
-```bash
-cd ./s2orc-doc2json/grobid-0.7.3
-./gradlew run
-```
-
-3. Convert your PDF into JSON format.
-
-```bash
-mkdir -p ./s2orc-doc2json/output_dir/paper_coder
-python ./s2orc-doc2json/doc2json/grobid2json/process_pdf.py \
-    -i ${PDF_PATH} \
-    -t ./s2orc-doc2json/temp_dir/ \
-    -o ./s2orc-doc2json/output_dir/paper_coder
-```
-
-### 🚀 Running PaperCoder
-- Note: The following command runs example paper ([Attention Is All You Need](https://arxiv.org/abs/1706.03762)).  
-  If you want to run PaperCoder on your own paper, please modify the environment variables accordingly.
-
-#### Using OpenAI API
-- 💵 Estimated cost for using o3-mini: $0.50–$0.70
-
-
-```bash
-# Using the PDF-based JSON format of the paper
-export OPENAI_API_KEY="<OPENAI_API_KEY>"
-
-cd scripts
-bash run.sh
-```
-
-```bash
-# Using the LaTeX source of the paper
-export OPENAI_API_KEY="<OPENAI_API_KEY>"
-
-cd scripts
-bash run_latex.sh
-```
-
-
-#### Using Open Source Models with vLLM
-- The default model is `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`.
-
-```bash
-# Using the PDF-based JSON format of the paper
-cd scripts
-bash run_llm.sh
-```
-
-```bash
-# Using the LaTeX source of the paper
-cd scripts
-bash run_latex_llm.sh
-```
-
----
-
-## 📦 Paper2Code Benchmark Datasets
-- Huggingface dataset: [paper2code](https://huggingface.co/datasets/iaminju/paper2code)
+## 📦 Paper2Code 基准数据集
+- Huggingface 数据集：[paper2code](https://huggingface.co/datasets/iaminju/paper2code)
   
-- You can find the description of the Paper2Code benchmark dataset in [data/paper2code](https://github.com/going-doer/Paper2Code/tree/main/data/paper2code). 
-- For more details, refer to Section 4.1 "Paper2Code Benchmark" in the [paper](https://arxiv.org/abs/2504.17192).
+- 您可以在 [data/paper2code](https://github.com/going-doer/Paper2Code/tree/main/data/paper2code) 中找到 Paper2Code 基准数据集的描述。
+- 有关详细信息，请参考 [论文](https://arxiv.org/abs/2504.17192) 中第 4.1 节"Paper2Code 基准"。
 
 
 ---
 
-## 📊 Model-based Evaluation of Repositories Generated by PaperCoder
+## 📊 由 PaperCoder 生成的代码库的模型评估
 
-- We evaluate repository quality using a model-based approach, supporting both reference-based and reference-free settings.  
-  The model critiques key implementation components, assigns severity levels, and generates a 1–5 correctness score averaged over 8 samples using **o3-mini-high**.
+- 我们使用基于模型的方法来评估代码库质量，支持基于参考和无参考两种设置。
+  模型评估关键实现组件，分配严重程度级别，并使用 **o3-mini-high** 生成在 8 个样本之间平均的 1-5 的正确性分数。
 
-- For more details, please refer to Section 4.3.1 (*Paper2Code Benchmark*) of the paper.
-- **Note:** The following examples evaluate the sample repository (**Transformer_repo**).  
-  Please modify the relevant paths and arguments if you wish to evaluate a different repository.
+- 有关详细信息，请参考论文中第 4.3.1 节（*Paper2Code 基准*）。
+- **注意：** 以下示例评估示例代码库（**Transformer_repo**）。
+  如果您想评估不同的代码库，请修改相关的路径和参数。
 
-### 🛠️ Environment Setup
+### 🛠️ 环境配置
 ```bash
 pip install tiktoken
 export OPENAI_API_KEY="<OPENAI_API_KEY>"
 ```
 
 
-### 📝 Reference-free Evaluation
-- `target_repo_dir` is the generated repository.
+### 📝 无参考评估
+- `target_repo_dir` 是生成的代码库。
 
 ```bash
 cd codes/
@@ -191,9 +97,9 @@ python eval.py \
     --papercoder
 ```
 
-### 📝 Reference-based Evaluation
-- `target_repo_dir` is the generated repository.
-- `gold_repo_dir` should point to the official repository (e.g., author-released code).
+### 📝 基于参考的评估
+- `target_repo_dir` 是生成的代码库。
+- `gold_repo_dir` 应指向官方代码库（例如，作者发布的代码）。
 
 ```bash
 cd codes/
@@ -211,24 +117,24 @@ python eval.py \
 ```
 
 
-### 📄 Example Output
+### 📄 输出示例
 ```bash
 ========================================
-🌟 Evaluation Summary 🌟
-📄 Paper name: Transformer
-🧪 Evaluation type: ref_based
-📁 Target repo directory: ../outputs/Transformer_repo
-📊 Evaluation result:
-        📈 Score: 4.5000
-        ✅ Valid: 8/8
+🌟 评估总结 🌟
+📄 论文名称：Transformer
+🧪 评估类型：ref_based
+📁 目标代码库目录：../outputs/Transformer_repo
+📊 评估结果：
+        📈 分数：4.5000
+        ✅ 有效：8/8
 ========================================
-🌟 Usage Summary 🌟
-[Evaluation] Transformer - ref_based
-🛠️ Model: o3-mini
-📥 Input tokens: 44318 (Cost: $0.04874980)
-📦 Cached input tokens: 0 (Cost: $0.00000000)
-📤 Output tokens: 26310 (Cost: $0.11576400)
-💵 Current total cost: $0.16451380
-🪙 Accumulated total cost so far: $0.16451380
+🌟 使用总结 🌟
+[评估] Transformer - ref_based
+🛠️ 模型：o3-mini
+📥 输入令牌：44318（成本：$0.04874980）
+📦 缓存输入令牌：0（成本：$0.00000000）
+📤 输出令牌：26310（成本：$0.11576400）
+💵 当前总成本：$0.16451380
+🪙 截至目前累计总成本：$0.16451380
 ============================================
 ```
