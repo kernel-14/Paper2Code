@@ -172,21 +172,20 @@ python eval.py \
 ### 📄 输出示例
 ```bash
 ========================================
-🌟 评估总结 🌟
-📄 论文名称：Transformer
-🧪 评估类型：ref_based
-📁 目标代码库目录：../outputs/Transformer_repo
-📊 评估结果：
-        📈 分数：4.5000
-        ✅ 有效：8/8
+🌟 Evaluation Summary 🌟
+📄 Paper name: Transformer
+🧪 Evaluation type: ref_based
+📁 Target repo directory: ../outputs/Transformer_repo
+📊 Evaluation result:
+        📈 Score: 4.5000
+        ✅ Valid: 8/8
 ========================================
-🌟 使用总结 🌟
-[评估] Transformer - ref_based
-🛠️ 模型：o3-mini
-📥 输入令牌：44318（成本：$0.04874980）
-📦 缓存输入令牌：0（成本：$0.00000000）
-📤 输出令牌：26310（成本：$0.11576400）
-💵 当前总成本：$0.16451380
-🪙 截至目前累计总成本：$0.16451380
-============================================
+🌟 Usage Summary 🌟
+[Evaluation] Transformer - ref_based
+🛠️ Model: o3-mini
+📥 Input tokens: 44318 (Cost: $0.04874980)
+📦 Cached input tokens: 0 (Cost: $0.00000000)
+📤 Output tokens: 26310 (Cost: $0.11576400)
+💵 Current total cost: $0.16451380
+🪙 Accumulated total cost so far: $0.16451380
 ```
