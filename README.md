@@ -4,6 +4,8 @@
 
 📄 [在 arXiv 上阅读论文](https://arxiv.org/abs/2504.17192)
 
+> 🔧 **本仓库是官方版本的 Windows 优化版本** - 专为 Windows 本地部署和 PowerShell 使用优化
+
 **PaperCoder** 是一个多智能体 LLM 系统，可以将论文转变为代码库。
 它遵循三阶段管道：规划、分析和代码生成，每个阶段由专门的智能体处理。
 我们的方法在 Paper2Code 和 PaperBench 上都优于强基线，并生成忠实、高质量的实现。
@@ -15,8 +17,11 @@
 - [📄 Paper2Code: 从机器学习科学论文自动生成代码](#-paper2code-从机器学习科学论文自动生成代码)
   - [🗺️ 目录](#️-目录)
   - [⚡ 快速开始](#-快速开始)
+    - [🎯 Windows PowerShell 原生支持版本](#-windows-powershell-原生支持版本)
     - [使用 OpenAI API](#使用-openai-api)
     - [输出文件夹结构（仅包含重要文件）](#输出文件夹结构仅包含重要文件)
+  - [� 版本说明](#-版本说明)
+    - [🔧 Windows 优化版本](#-windows-优化版本)
   - [📦 Paper2Code 基准数据集](#-paper2code-基准数据集)
   - [📊 由 PaperCoder 生成的代码库的模型评估](#-由-papercoder-生成的代码库的模型评估)
     - [🛠️ 环境配置](#️-环境配置)
@@ -29,18 +34,45 @@
 ## ⚡ 快速开始
 - 注意：以下命令运行示例论文 ([Attention Is All You Need](https://arxiv.org/abs/1706.03762))。  
 
+### 🎯 Windows PowerShell 原生支持版本
+本版本针对 **Windows 本地部署** 做了优化改进，相比原版本主要改进：
+
+✨ **核心改进：**
+- ✅ 原生支持 Windows PowerShell 执行（无需 Git Bash）
+- ✅ Python 脚本入口 (`scripts/run.py`) - 替代 Bash 脚本
+- ✅ 完整的 UTF-8 编码支持 - 解决 Windows GBK 编码问题
+- ✅ `.env` 文件管理 API_KEY 和自定义 API 端点
+- ✅ 支持自定义 OpenAI 兼容 API 服务 (base_url 配置)
+- ✅ 详细的调试日志输出
+
+📋 **环境配置：**
+
+创建 `.env` 文件在项目根目录：
+```
+OPENAI_API_KEY=sk-your-api-key
+OPENAI_API_BASE=http://your-api.com:3000  # 可选，用于自定义API端点
+```
+
 ### 使用 OpenAI API
 - 💵 使用 o3-mini 的预计成本：$0.50–$0.70
 
-- ⭐ 修改了一部分代码，更方便在windows本地部署，原始代码请见原仓库
-
--（新增功能）：使用.env管理api，请修改根目录下.env文件
-
-- 在powershell中
 ```bash
-pip install openai
+pip install openai python-dotenv
+
 cd scripts
 python run.py
+```
+
+**高级用法 (可选参数)：**
+```bash
+# 自定义 API 端点
+python run.py --api-base-url http://your-api.com:3000
+
+# 指定不同的论文和模型
+python run.py --paper MyPaper --gpt-version gpt-4o
+
+# 直接提供 API_KEY (不使用 .env)
+python run.py --api-key sk-your-key
 ```
 
 
@@ -53,6 +85,24 @@ outputs
 │   └── planning_artifacts
 └── Transformer_repo # 最终输出代码库
 ```
+
+---
+
+## 📝 版本说明
+
+### 🔧 Windows 优化版本
+
+本仓库是官方 [PaperCoder](https://github.com/going-doer/Paper2Code) 的 **Windows 本地部署优化版本**。
+
+**主要改进：**
+- ✅ 原生 PowerShell 支持（无需 Git Bash）
+- ✅ `.env` 文件和命令行参数管理 API_KEY
+- ✅ 支持自定义 OpenAI 兼容 API 服务
+- ✅ 完全 UTF-8 编码支持（修复 Windows GBK 问题）
+- ✅ 详细的调试日志输出
+
+**详细对比及使用指南**: 📖 [查看 WINDOWS_OPTIMIZATION.md](WINDOWS_OPTIMIZATION.md)
+
 ---
 
 ## 📦 Paper2Code 基准数据集
